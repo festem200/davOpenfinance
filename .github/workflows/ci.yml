@@ -63,3 +63,4 @@ jobs:
             --exclude-path node_modules
             './**/*.md'
           fail: true
+          failIfEmpty: false
