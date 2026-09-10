@@ -1,0 +1,55 @@
+{
+  "summary": "Autorizado — el titular eligió su producto",
+  "value": {
+    "consentId": "cns_7Kd9mQ2pLx4Rt8Vw",
+    "type": "SINGLE",
+    "instrumentType": "SAVINGS_ACCOUNT",
+    "amount": {
+      "amount": "150000.00",
+      "currency": "COP"
+    },
+    "creditor": {
+      "name": "Tienda Ejemplo S.A.S.",
+      "identification": {
+        "type": "NIT",
+        "number": "900123456-7"
+      },
+      "merchantCategoryCode": "5732"
+    },
+    "thirdParty": {
+      "name": "Tienda Ejemplo S.A.S.",
+      "domicile": "Calle 100 # 8A-49, Bogotá D.C."
+    },
+    "purpose": "Pago de la orden 48213 — suscripción anual",
+    "expiresAt": "2026-09-11T14:30:00Z",
+    "remittanceInformation": "TIENDA EJEMPLO ORDEN 48213",
+    "authorization": {
+      "mode": "REDIRECT",
+      "authorizationDetails": {
+        "type": "payment_consent",
+        "consentId": "cns_7Kd9mQ2pLx4Rt8Vw",
+        "actions": [
+          "initiate",
+          "read"
+        ],
+        "instrumentType": "SAVINGS_ACCOUNT",
+        "amount": {
+          "amount": "150000.00",
+          "currency": "COP"
+        },
+        "creditorName": "Tienda Ejemplo S.A.S."
+      }
+    },
+    "createdAt": "2026-09-10T14:30:12Z",
+    "links": {
+      "self": "/payment-consents/cns_7Kd9mQ2pLx4Rt8Vw"
+    },
+    "status": "AUTHORISED",
+    "instrument": {
+      "type": "SAVINGS_ACCOUNT",
+      "productReference": "prd_9Qz2Lm7Xw4Kd8Vn1",
+      "maskedNumber": "****4821"
+    },
+    "authorisedAt": "2026-09-10T14:31:48Z"
+  }
+}

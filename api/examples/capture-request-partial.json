@@ -1,0 +1,10 @@
+{
+  "summary": "Captura parcial al despachar el primer artículo",
+  "value": {
+    "amount": {
+      "amount": "500000.00",
+      "currency": "COP"
+    },
+    "remittanceInformation": "TIENDA EJEMPLO ORDEN 48214 ENVIO 1/2"
+  }
+}

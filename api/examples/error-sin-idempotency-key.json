@@ -1,0 +1,17 @@
+{
+  "summary": "Falta el encabezado Idempotency-Key",
+  "value": {
+    "type": "https://developer.entidad-financiera.example/errors/idempotency-key-requerida",
+    "title": "Falta Idempotency-Key",
+    "status": 400,
+    "detail": "Toda operación que mueve dinero exige el encabezado Idempotency-Key (UUID). Sin él no hay forma segura de reintentar.",
+    "instance": "/payments",
+    "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "errors": [
+      {
+        "field": "Idempotency-Key",
+        "message": "Encabezado requerido, formato UUID"
+      }
+    ]
+  }
+}

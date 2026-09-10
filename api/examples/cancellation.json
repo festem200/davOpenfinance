@@ -1,0 +1,10 @@
+{
+  "summary": "Autorización anulada, cupo liberado",
+  "value": {
+    "cancellationId": "cnl_7Xk3Qw9Nt2Vb5Lm8",
+    "paymentId": "pay_8Wq2Nv5Tb9Xk4Jm7",
+    "status": "PROCESSED",
+    "reason": "ORDER_CANCELLED",
+    "createdAt": "2026-09-11T10:02:15Z"
+  }
+}

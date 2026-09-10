@@ -1,0 +1,13 @@
+{
+  "summary": "Cobro contra cuenta de ahorros",
+  "value": {
+    "consentId": "cns_7Kd9mQ2pLx4Rt8Vw",
+    "amount": {
+      "amount": "150000.00",
+      "currency": "COP"
+    },
+    "metadata": {
+      "orderId": "48213"
+    }
+  }
+}

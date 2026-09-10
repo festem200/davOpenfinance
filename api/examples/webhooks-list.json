@@ -1,0 +1,19 @@
+{
+  "summary": "Suscripciones del aliado",
+  "value": {
+    "items": [
+      {
+        "webhookId": "whk_5Nq8Tk2Xw7Lb4Vm9",
+        "url": "https://aliado.example/webhooks/pagos",
+        "events": [
+          "payment.settled",
+          "payment.rejected",
+          "consent.revoked"
+        ],
+        "status": "ACTIVE",
+        "signingKeyId": "entidad-2026-09",
+        "createdAt": "2026-09-10T14:00:00Z"
+      }
+    ]
+  }
+}

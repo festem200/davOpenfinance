@@ -1,0 +1,11 @@
+{
+  "summary": "Devolución parcial por artículo no entregado",
+  "value": {
+    "amount": {
+      "amount": "50000.00",
+      "currency": "COP"
+    },
+    "reason": "PRODUCT_NOT_DELIVERED",
+    "remittanceInformation": "DEVOLUCION ORDEN 48213"
+  }
+}

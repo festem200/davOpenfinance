@@ -1,0 +1,49 @@
+{
+  "summary": "Tarjeta autorizada, cupo retenido, pendiente de captura",
+  "value": {
+    "paymentId": "pay_8Wq2Nv5Tb9Xk4Jm7",
+    "consentId": "cns_2Bx6Wn9Qr4Tk7Mp1",
+    "status": "AUTHORIZED",
+    "instrument": {
+      "type": "CREDIT_CARD",
+      "productReference": "prd_4Vb7Nk2Qw9Xt5Lm8",
+      "maskedNumber": "****7730",
+      "brand": "VISA"
+    },
+    "amount": {
+      "amount": "890000.00",
+      "currency": "COP"
+    },
+    "capturedAmount": {
+      "amount": "0.00",
+      "currency": "COP"
+    },
+    "refundedAmount": {
+      "amount": "0.00",
+      "currency": "COP"
+    },
+    "creditor": {
+      "name": "Tienda Ejemplo S.A.S.",
+      "identification": {
+        "type": "NIT",
+        "number": "900123456-7"
+      },
+      "merchantCategoryCode": "5732"
+    },
+    "remittanceInformation": "TIENDA EJEMPLO ORDEN 48214",
+    "installments": 3,
+    "captureMode": "MANUAL",
+    "authorizationExpiresAt": "2026-09-17T15:02:41Z",
+    "metadata": {
+      "orderId": "48214"
+    },
+    "createdAt": "2026-09-10T15:02:41Z",
+    "updatedAt": "2026-09-10T15:02:41Z",
+    "links": {
+      "self": "/payments/pay_8Wq2Nv5Tb9Xk4Jm7",
+      "consent": "/payment-consents/cns_2Bx6Wn9Qr4Tk7Mp1",
+      "captures": "/payments/pay_8Wq2Nv5Tb9Xk4Jm7/captures",
+      "refunds": "/payments/pay_8Wq2Nv5Tb9Xk4Jm7/refunds"
+    }
+  }
+}

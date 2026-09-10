@@ -1,0 +1,35 @@
+{
+  "summary": "Cobro mensual recurrente con tarjeta de crédito",
+  "value": {
+    "type": "RECURRING",
+    "instrumentType": "CREDIT_CARD",
+    "amount": {
+      "amount": "59900.00",
+      "currency": "COP"
+    },
+    "recurrence": {
+      "frequency": "MONTHLY",
+      "maxAmountPerPayment": {
+        "amount": "59900.00",
+        "currency": "COP"
+      },
+      "maxAmountPerPeriod": {
+        "amount": "59900.00",
+        "currency": "COP"
+      },
+      "validUntil": "2027-09-10"
+    },
+    "creditor": {
+      "name": "Tienda Ejemplo S.A.S.",
+      "identification": {
+        "type": "NIT",
+        "number": "900123456-7"
+      },
+      "merchantCategoryCode": "5732"
+    },
+    "purpose": "Suscripción mensual plan Premium",
+    "expiresAt": "2027-09-10T23:59:59Z",
+    "remittanceInformation": "TIENDA EJEMPLO PREMIUM",
+    "authorizationMode": "REDIRECT"
+  }
+}

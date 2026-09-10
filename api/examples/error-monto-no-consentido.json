@@ -1,0 +1,11 @@
+{
+  "summary": "El monto no coincide con el consentimiento atado al token",
+  "value": {
+    "type": "https://developer.entidad-financiera.example/errors/monto-no-consentido",
+    "title": "El monto no coincide con el consentimiento",
+    "status": 403,
+    "detail": "El consentimiento cns_7Kd9mQ2pLx4Rt8Vw autoriza exactamente 150000.00 COP; la petición pide 180000.00 COP. Crea un consentimiento nuevo por el monto correcto — un consentimiento no se puede ampliar.",
+    "instance": "/payments",
+    "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
+  }
+}

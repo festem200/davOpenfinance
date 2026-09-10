@@ -1,0 +1,11 @@
+{
+  "summary": "Transición inválida para el estado actual",
+  "value": {
+    "type": "https://developer.entidad-financiera.example/errors/transicion-invalida",
+    "title": "El pago no admite esta operación en su estado actual",
+    "status": 409,
+    "detail": "El pago pay_8Wq2Nv5Tb9Xk4Jm7 está en CANCELLED y no puede capturarse. Consulta GET /payments/{paymentId} para ver el estado vigente.",
+    "instance": "/payments/pay_8Wq2Nv5Tb9Xk4Jm7/captures",
+    "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
+  }
+}

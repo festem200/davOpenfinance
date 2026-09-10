@@ -3,19 +3,49 @@ openapi: 3.1.0
 info:
   title: API de Pagos — Open Finance
   version: 1.0.0
-  summary: Cobros y pagos con Cuenta de Ahorros y Tarjeta de Crédito para aliados y Fintechs.
+  summary: Cobros con Cuenta de Ahorros y Tarjeta de Crédito para aliados comerciales y Fintechs.
   description: |
     Contrato de las APIs de pago que una entidad financiera expone a sus aliados
     comerciales y Fintechs para realizar cobros contra los productos de sus clientes.
+    El *backend* transaccional es un BUS corporativo SOAP; esta fachada REST es la única
+    superficie que un aliado ve — y la única permitida por la SFC, que prohíbe SOAP en
+    las APIs del sistema de finanzas abiertas.
 
-    El contrato tiene **dos planos**:
+    ## Dos planos
 
-    - **Plano de negocio** — consentimientos, pagos, capturas, devoluciones y eventos.
-    - **Plano de confianza** — los endpoints que validan que las dos entidades son
-      quienes dicen ser (FAPI 2.0, mTLS, prueba de conexión).
+    - **Plano de confianza** — descubrimiento, registro del aliado, obtención de tokens bajo
+      **FAPI 2.0** y prueba de conexión. Sostiene la relación entre las dos entidades.
+    - **Plano de negocio** — consentimientos, pagos, capturas, anulaciones, devoluciones,
+      métodos de pago y eventos.
 
-    Todos los errores se devuelven como **RFC 9457 Problem Details**
-    (`application/problem+json`).
+    ## Dos rieles bajo una sola superficie
+
+    | Instrumento | Fases | Riel |
+    |---|---|---|
+    | `SAVINGS_ACCOUNT` | Una: el débito se ejecuta al crear el pago | Débito on-us / pagos inmediatos |
+    | `CREDIT_CARD` | Dos: autorización al crear el pago, captura posterior (total o parcial) | Adquirencia y franquicia |
+
+    El recurso `/payments` es el mismo para ambos; cambia el instrumento y qué sub-recursos
+    aplican. La [máquina de estados](https://github.com/festem200/davOpenfinance/blob/main/docs/diagrams/04-maquina-de-estados-pago.png)
+    documenta cada transición.
+
+    ## Convenciones transversales
+
+    - **Errores:** siempre **RFC 9457 Problem Details** (`application/problem+json`), con `type`
+      apuntando a un catálogo público y `traceId` para soporte.
+    - **Idempotencia:** todo `POST` que mueve dinero exige `Idempotency-Key`. Misma clave +
+      mismo cuerpo → misma respuesta (`Idempotency-Replayed: true`); misma clave + cuerpo
+      distinto → `422`.
+    - **Dinero:** cadena decimal + ISO 4217. Nunca números de punto flotante.
+    - **Timeout del core:** si la orden ya se envió al BUS y este no responde a tiempo, el
+      pago **existe** con estado `PENDING` y se resuelve por consulta de referencia. Nunca se
+      responde `504` para un pago que pudo haberse ejecutado.
+    - **Paginación:** por cursor opaco (`nextCursor`), nunca por offset.
+    - **Trazabilidad:** `traceparent` (W3C Trace Context) se propaga hasta el BUS.
+    - **Firma de mensajes:** las peticiones que mueven dinero y todos los webhooks van
+      firmados con **HTTP Message Signatures (RFC 9421)** + `Content-Digest` (RFC 9530).
+    - **Datos mínimos:** el aliado nunca recibe números de cuenta ni de tarjeta completos —
+      solo una referencia opaca del producto y un enmascarado para mostrar al cliente.
   contact:
     name: Portal de desarrolladores
     url: https://developer.entidad-financiera.example/open-finance
@@ -25,17 +55,245 @@ info:
 
 servers:
   - url: https://sandbox.api.entidad-financiera.example/open-finance/payments/v1
-    description: Sandbox — datos sintéticos, sin efectos reales sobre dinero
+    description: Sandbox — datos sintéticos, escenarios deterministas, sin efectos sobre dinero real
   - url: https://api.entidad-financiera.example/open-finance/payments/v1
     description: Producción
 
 tags:
   - name: Confianza
     description: |
-      Endpoints que sostienen la relación entre las dos entidades: descubrimiento,
-      llaves públicas y verificación de la conexión antes de mover dinero.
+      Endpoints que sostienen la relación entre las dos entidades: descubrimiento, registro
+      del aliado, emisión de tokens bajo FAPI 2.0 y verificación de la conexión **antes de
+      mover dinero**. Los endpoints de autorización viven en el servidor de autorización de
+      la entidad (`servers` propio en cada operación).
+  - name: Consentimientos
+    description: |
+      Autorización del titular para que el aliado cobre contra uno de sus productos. Tiene
+      ciclo de vida propio, vigencia y revocación. Un consentimiento `SINGLE` cubre un solo
+      pago; uno `RECURRING` cubre una serie con tope por pago y por periodo.
+  - name: Pagos
+    description: Iniciación y consulta de cobros. `GET /payments/{paymentId}` es la fuente de verdad para conciliar.
+  - name: Capturas
+    description: Solo tarjeta de crédito. Captura total o parcial de una autorización.
+  - name: Anulaciones
+    description: Solo tarjeta de crédito. Libera una autorización no capturada.
+  - name: Devoluciones
+    description: Devolución total o parcial de un pago capturado o liquidado.
+  - name: Métodos de pago
+    description: Instrumentos habilitados para el aliado y sus límites vigentes.
+  - name: Eventos
+    description: |
+      Notificaciones **push** (webhooks firmados) **y** un feed **pull** paginado. El aliado
+      que pierda un webhook se recupera leyendo el feed — nunca depende solo de reintentos.
 
 paths:
+  # ───────────────────────────── Plano de confianza ─────────────────────────────
+
+  /.well-known/openid-configuration:
+    servers:
+      - url: https://auth.entidad-financiera.example
+    get:
+      operationId: descubrirConfiguracion
+      tags: [Confianza]
+      summary: Metadatos del servidor de autorización
+      description: |
+        OpenID Discovery / RFC 8414. Publica las URL de `/par`, `/token`, `/bc-authorize`,
+        `/jwks` y `/register`, los métodos de autenticación de cliente admitidos
+        (`private_key_jwt`, `tls_client_auth`), los algoritmos (PS256 o superior — HS256 se
+        rechaza), los scopes soportados y `require_pushed_authorization_requests: true`.
+        El aliado configura **una sola URL** y descubre el resto.
+      security: []
+      responses:
+        "200":
+          description: Metadatos del servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfiguracionServidorAutorizacion"
+              examples:
+                sandbox:
+                  $ref: "./examples/openid-configuration.json"
+        "429":
+          $ref: "#/components/responses/LimiteExcedido"
+
+  /jwks:
+    servers:
+      - url: https://auth.entidad-financiera.example
+    get:
+      operationId: obtenerLlavesPublicas
+      tags: [Confianza]
+      summary: Llaves públicas de la entidad (JWK Set)
+      description: |
+        RFC 7517. Con estas llaves el aliado verifica los tokens emitidos, las firmas de los
+        webhooks y las respuestas firmadas. Cada llave lleva `kid`; la rotación publica la
+        llave nueva antes de usarla y mantiene la anterior mientras haya tokens vivos.
+      security: []
+      responses:
+        "200":
+          description: Conjunto de llaves públicas
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JwkSet"
+              examples:
+                sandbox:
+                  $ref: "./examples/jwks.json"
+        "429":
+          $ref: "#/components/responses/LimiteExcedido"
+
+  /register:
+    servers:
+      - url: https://auth.entidad-financiera.example
+    post:
+      operationId: registrarCliente
+      tags: [Confianza]
+      summary: Registro dinámico del aliado como cliente OAuth
+      description: |
+        RFC 7591. El aliado presenta un **Software Statement** (JWT firmado por el directorio
+        de participantes o, mientras la SFC lo pone en marcha, por la propia entidad tras la
+        debida diligencia del alta) con su `jwks_uri`, sus `redirect_uris` y los scopes que
+        solicita. La entidad valida la firma, cruza el certificado de transporte con el
+        registro y devuelve el `client_id`. Sustituye el alta manual por correo.
+      security:
+        - mutualTLS: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegistroClienteRequest"
+      responses:
+        "201":
+          description: Cliente registrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistroClienteResponse"
+              examples:
+                sandbox:
+                  $ref: "./examples/register-response.json"
+        "400":
+          $ref: "#/components/responses/SolicitudInvalida"
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+
+  /par:
+    servers:
+      - url: https://auth.entidad-financiera.example
+    post:
+      operationId: enviarSolicitudAutorizacion
+      tags: [Confianza]
+      summary: Pushed Authorization Request (PAR)
+      description: |
+        RFC 9126 — **obligatorio en FAPI 2.0**. El aliado envía por el canal posterior,
+        autenticado como cliente (`private_key_jwt` o mTLS), los parámetros de la
+        autorización: `scope`, `authorization_details` (RAR, RFC 9396) con el consentimiento
+        exacto, `code_challenge` (PKCE S256) y `redirect_uri`. Recibe un `request_uri` de un
+        solo uso con el que redirige al titular a `/authorize`. Nada sensible viaja por el
+        navegador.
+      security:
+        - mutualTLS: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/ParRequest"
+      responses:
+        "201":
+          description: Solicitud aceptada; usar `request_uri` en la redirección
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParResponse"
+              examples:
+                sandbox:
+                  $ref: "./examples/par-response.json"
+        "400":
+          $ref: "#/components/responses/ErrorOAuth"
+        "401":
+          $ref: "#/components/responses/ErrorOAuth"
+
+  /bc-authorize:
+    servers:
+      - url: https://auth.entidad-financiera.example
+    post:
+      operationId: iniciarAutorizacionDesacoplada
+      tags: [Confianza]
+      summary: Autorización desacoplada (CIBA)
+      description: |
+        FAPI-CIBA. Para cobros donde el titular **no está frente al navegador del aliado**:
+        punto de venta físico, centro de contacto, cobro recurrente. El aliado envía el
+        consentimiento en `authorization_details` y un `login_hint`; la entidad notifica al
+        titular en su propio canal (app), donde autentica y **confirma** el cobro. El aliado
+        consulta `/token` con el `auth_req_id` (modo *poll*) o recibe un *ping*.
+      security:
+        - mutualTLS: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/CibaRequest"
+      responses:
+        "200":
+          description: Solicitud entregada al titular
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CibaResponse"
+              examples:
+                sandbox:
+                  $ref: "./examples/ciba-response.json"
+        "400":
+          $ref: "#/components/responses/ErrorOAuth"
+        "401":
+          $ref: "#/components/responses/ErrorOAuth"
+
+  /token:
+    servers:
+      - url: https://auth.entidad-financiera.example
+    post:
+      operationId: obtenerToken
+      tags: [Confianza]
+      summary: Emisión de tokens
+      description: |
+        RFC 6749 bajo FAPI 2.0. Grants admitidos:
+
+        | Grant | Para qué | Scopes posibles |
+        |---|---|---|
+        | `client_credentials` | Operaciones **sin titular**: métodos de pago, webhooks, prueba de conexión | `payment-methods:read`, `webhooks:manage`, `connection:test` |
+        | `authorization_code` (+ PKCE, desde PAR) | Todo lo que **mueve dinero o toca datos del titular** | `consents:*`, `payments:*`, `refunds:*` |
+        | `urn:openid:params:grant-type:ciba` | Igual que el anterior, en flujo desacoplado | Ídem |
+        | `refresh_token` | Consentimientos `RECURRING` | Los del consentimiento |
+
+        Rechazados: `password` y cualquier cliente público. El token es un **JWT firmado con
+        PS256 o superior**, **vinculado al certificado** del cliente (`cnf.x5t#S256`, RFC 8705)
+        y con vida corta. Contiene los `authorization_details` autorizados: el token queda
+        atado al monto, beneficiario y producto del consentimiento — no a "pagos en general".
+      security:
+        - mutualTLS: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/TokenRequest"
+      responses:
+        "200":
+          description: Token emitido
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+              examples:
+                sandbox:
+                  $ref: "./examples/token-response.json"
+        "400":
+          $ref: "#/components/responses/ErrorOAuth"
+        "401":
+          $ref: "#/components/responses/ErrorOAuth"
+
   /connection-test:
     get:
       operationId: probarConexion
@@ -50,7 +308,10 @@ paths:
         de emitir su primer cobro, y da soporte al requisito de *validación periódica del
         intercambio por API*.
       security:
-        - oauth2: ["connection:test"]
+        - mutualTLS: []
+          oauth2: ["connection:test"]
+      parameters:
+        - $ref: "#/components/parameters/Traceparent"
       responses:
         "200":
           description: Conexión válida
@@ -64,14 +325,735 @@ paths:
         "401":
           $ref: "#/components/responses/NoAutenticado"
 
+  # ───────────────────────────── Consentimientos ─────────────────────────────
+
+  /payment-consents:
+    post:
+      operationId: crearConsentimiento
+      tags: [Consentimientos]
+      summary: Crea un consentimiento de pago
+      description: |
+        Primer paso de cualquier cobro. El aliado declara **exactamente** lo que el titular va
+        a autorizar: instrumento, monto (o tope si es recurrente), beneficiario, finalidad
+        específica y vigencia — los campos mínimos que exige la norma colombiana para una
+        autorización, que prohíbe las autorizaciones generales o abiertas.
+
+        La respuesta trae el `consentId` y cómo continuar: `REDIRECT` (el aliado hace PAR con
+        este consentimiento en `authorization_details` y redirige al titular) o `DECOUPLED`
+        (CIBA). En ambos casos **la entidad autentica al titular y le muestra el contenido del
+        consentimiento para que autorice o deniegue** — el aliado nunca ve credenciales.
+      security:
+        - mutualTLS: []
+          oauth2: ["consents:write"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/Traceparent"
+        - $ref: "#/components/parameters/SignatureInput"
+        - $ref: "#/components/parameters/Signature"
+        - $ref: "#/components/parameters/ContentDigest"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentConsentRequest"
+            examples:
+              ahorrosUnico:
+                $ref: "./examples/consent-request-savings-single.json"
+              tarjetaRecurrente:
+                $ref: "./examples/consent-request-card-recurring.json"
+      responses:
+        "201":
+          description: Consentimiento creado, pendiente de autorización del titular
+          headers:
+            Location:
+              $ref: "#/components/headers/Location"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentConsent"
+              examples:
+                pendiente:
+                  $ref: "./examples/consent-awaiting.json"
+        "400":
+          $ref: "#/components/responses/SolicitudInvalida"
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+        "403":
+          $ref: "#/components/responses/Prohibido"
+        "422":
+          $ref: "#/components/responses/NoProcesable"
+        "429":
+          $ref: "#/components/responses/LimiteExcedido"
+
+  /payment-consents/{consentId}:
+    parameters:
+      - $ref: "#/components/parameters/ConsentId"
+    get:
+      operationId: consultarConsentimiento
+      tags: [Consentimientos]
+      summary: Consulta un consentimiento
+      description: Estado actual, producto seleccionado por el titular (enmascarado) y vigencia.
+      security:
+        - mutualTLS: []
+          oauth2: ["consents:read"]
+      parameters:
+        - $ref: "#/components/parameters/Traceparent"
+      responses:
+        "200":
+          description: Consentimiento
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentConsent"
+              examples:
+                autorizado:
+                  $ref: "./examples/consent-authorised.json"
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+        "403":
+          $ref: "#/components/responses/Prohibido"
+        "404":
+          $ref: "#/components/responses/NoEncontrado"
+    delete:
+      operationId: revocarConsentimiento
+      tags: [Consentimientos]
+      summary: Revoca un consentimiento
+      description: |
+        Lo deja en `REVOKED`. Los pagos ya ejecutados no se afectan; ningún pago nuevo puede
+        usarlo. El titular también puede revocarlo desde su propio canal — el aliado se entera
+        por el evento `consent.revoked`.
+      security:
+        - mutualTLS: []
+          oauth2: ["consents:write"]
+      parameters:
+        - $ref: "#/components/parameters/Traceparent"
+      responses:
+        "204":
+          description: Revocado
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+        "403":
+          $ref: "#/components/responses/Prohibido"
+        "404":
+          $ref: "#/components/responses/NoEncontrado"
+
+  # ───────────────────────────── Pagos ─────────────────────────────
+
+  /payments:
+    post:
+      operationId: crearPago
+      tags: [Pagos]
+      summary: Inicia un cobro contra un consentimiento autorizado
+      description: |
+        Ejecuta la orden. El token debe traer en `authorization_details` el mismo
+        consentimiento, y el monto debe coincidir (`SINGLE`) o respetar los topes
+        (`RECURRING`); si no, `403`.
+
+        - `SAVINGS_ACCOUNT`: el débito se ejecuta ahora. Respuesta `201` con `CAPTURED`
+          (o `SETTLED` si la liquidación es inmediata).
+        - `CREDIT_CARD`: se **autoriza** y se retiene cupo. Respuesta `201` con `AUTHORIZED`;
+          luego se captura con `POST /payments/{paymentId}/captures` (o de inmediato si
+          `captureMode: AUTOMATIC`).
+
+        **Timeout del core.** Si la orden ya viajó al BUS y este no responde dentro del
+        presupuesto de latencia, la respuesta es igualmente `201` con `PENDING`: el recurso
+        existe y su estado final llega por evento o por `GET`. Un `504` aquí sería una
+        mentira peligrosa — el débito pudo haberse ejecutado.
+      security:
+        - mutualTLS: []
+          oauth2: ["payments:initiate"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/Traceparent"
+        - $ref: "#/components/parameters/SignatureInput"
+        - $ref: "#/components/parameters/Signature"
+        - $ref: "#/components/parameters/ContentDigest"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentRequest"
+            examples:
+              ahorros:
+                $ref: "./examples/payment-request-savings.json"
+              tarjeta:
+                $ref: "./examples/payment-request-card.json"
+      responses:
+        "201":
+          description: Pago creado (ejecutado, autorizado o pendiente de confirmación del core)
+          headers:
+            Location:
+              $ref: "#/components/headers/Location"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+              examples:
+                ahorrosLiquidado:
+                  $ref: "./examples/payment-savings-settled.json"
+                tarjetaAutorizada:
+                  $ref: "./examples/payment-card-authorized.json"
+                pendienteDelCore:
+                  $ref: "./examples/payment-pending-core-timeout.json"
+        "400":
+          $ref: "#/components/responses/SolicitudInvalida"
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+        "403":
+          $ref: "#/components/responses/Prohibido"
+        "409":
+          $ref: "#/components/responses/Conflicto"
+        "422":
+          $ref: "#/components/responses/NoProcesable"
+        "429":
+          $ref: "#/components/responses/LimiteExcedido"
+        "503":
+          $ref: "#/components/responses/CoreNoDisponible"
+    get:
+      operationId: listarPagos
+      tags: [Pagos]
+      summary: Lista pagos del aliado
+      description: Para conciliación. Paginado por cursor; filtra por estado y ventana de tiempo.
+      security:
+        - mutualTLS: []
+          oauth2: ["payments:read"]
+      parameters:
+        - $ref: "#/components/parameters/Traceparent"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/PaymentStatus"
+        - name: from
+          in: query
+          description: Inicio de la ventana (inclusive), por `createdAt`.
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          description: Fin de la ventana (exclusive), por `createdAt`.
+          schema: { type: string, format: date-time }
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Página de pagos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentPage"
+              examples:
+                pagina:
+                  $ref: "./examples/payments-page.json"
+        "400":
+          $ref: "#/components/responses/SolicitudInvalida"
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+        "403":
+          $ref: "#/components/responses/Prohibido"
+
+  /payments/{paymentId}:
+    parameters:
+      - $ref: "#/components/parameters/PaymentId"
+    get:
+      operationId: consultarPago
+      tags: [Pagos]
+      summary: Consulta un pago
+      description: |
+        **Fuente de verdad** para conciliar. Idempotente y barato: ante cualquier duda
+        (timeout, webhook perdido, respuesta ambigua) el aliado consulta aquí en vez de
+        reintentar el `POST`.
+      security:
+        - mutualTLS: []
+          oauth2: ["payments:read"]
+      parameters:
+        - $ref: "#/components/parameters/Traceparent"
+      responses:
+        "200":
+          description: Pago
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+              examples:
+                liquidado:
+                  $ref: "./examples/payment-savings-settled.json"
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+        "403":
+          $ref: "#/components/responses/Prohibido"
+        "404":
+          $ref: "#/components/responses/NoEncontrado"
+
+  /payments/{paymentId}/captures:
+    parameters:
+      - $ref: "#/components/parameters/PaymentId"
+    post:
+      operationId: capturarPago
+      tags: [Capturas]
+      summary: Captura una autorización de tarjeta
+      description: |
+        Solo `CREDIT_CARD` en estado `AUTHORIZED`. Sin `amount`, captura el saldo autorizado
+        restante. La suma de capturas nunca supera el monto autorizado (`422`). Sobre un pago
+        que no está autorizado, `409`.
+      security:
+        - mutualTLS: []
+          oauth2: ["payments:capture"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/Traceparent"
+        - $ref: "#/components/parameters/SignatureInput"
+        - $ref: "#/components/parameters/Signature"
+        - $ref: "#/components/parameters/ContentDigest"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CaptureRequest"
+            examples:
+              parcial:
+                $ref: "./examples/capture-request-partial.json"
+      responses:
+        "201":
+          description: Captura procesada
+          headers:
+            Location:
+              $ref: "#/components/headers/Location"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Capture"
+              examples:
+                parcial:
+                  $ref: "./examples/capture-partial.json"
+        "400":
+          $ref: "#/components/responses/SolicitudInvalida"
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+        "403":
+          $ref: "#/components/responses/Prohibido"
+        "404":
+          $ref: "#/components/responses/NoEncontrado"
+        "409":
+          $ref: "#/components/responses/Conflicto"
+        "422":
+          $ref: "#/components/responses/NoProcesable"
+        "503":
+          $ref: "#/components/responses/CoreNoDisponible"
+    get:
+      operationId: listarCapturas
+      tags: [Capturas]
+      summary: Lista las capturas de un pago
+      description: Todas las capturas del pago, en orden de creación. La suma de las procesadas es `capturedAmount` del pago.
+      security:
+        - mutualTLS: []
+          oauth2: ["payments:read"]
+      parameters:
+        - $ref: "#/components/parameters/Traceparent"
+      responses:
+        "200":
+          description: Capturas del pago
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Capture"
+              examples:
+                capturas:
+                  $ref: "./examples/captures-list.json"
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+        "403":
+          $ref: "#/components/responses/Prohibido"
+        "404":
+          $ref: "#/components/responses/NoEncontrado"
+
+  /payments/{paymentId}/cancellations:
+    parameters:
+      - $ref: "#/components/parameters/PaymentId"
+    post:
+      operationId: anularAutorizacion
+      tags: [Anulaciones]
+      summary: Anula una autorización de tarjeta no capturada
+      description: |
+        Solo `CREDIT_CARD` en `AUTHORIZED` sin capturas. Libera el cupo retenido y deja el pago
+        en `CANCELLED`. Si ya hubo capturas, lo correcto es una **devolución**, no una
+        anulación (`409`).
+      security:
+        - mutualTLS: []
+          oauth2: ["payments:cancel"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/Traceparent"
+        - $ref: "#/components/parameters/SignatureInput"
+        - $ref: "#/components/parameters/Signature"
+        - $ref: "#/components/parameters/ContentDigest"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancellationRequest"
+      responses:
+        "201":
+          description: Autorización anulada
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cancellation"
+              examples:
+                anulada:
+                  $ref: "./examples/cancellation.json"
+        "400":
+          $ref: "#/components/responses/SolicitudInvalida"
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+        "403":
+          $ref: "#/components/responses/Prohibido"
+        "404":
+          $ref: "#/components/responses/NoEncontrado"
+        "409":
+          $ref: "#/components/responses/Conflicto"
+        "503":
+          $ref: "#/components/responses/CoreNoDisponible"
+
+  /payments/{paymentId}/refunds:
+    parameters:
+      - $ref: "#/components/parameters/PaymentId"
+    post:
+      operationId: crearDevolucion
+      tags: [Devoluciones]
+      summary: Devuelve total o parcialmente un pago
+      description: |
+        Sobre pagos `CAPTURED`, `SETTLED` o `PARTIALLY_REFUNDED`. Sin `amount`, devuelve todo
+        lo no devuelto. La suma de devoluciones nunca supera lo capturado (`422`). El dinero
+        vuelve al **mismo producto** del que salió — nunca a un destino elegido por el aliado.
+        Requiere el scope `refunds:write`, separado de `payments:initiate` a propósito: el
+        sistema que cobra rara vez debe ser el que devuelve.
+      security:
+        - mutualTLS: []
+          oauth2: ["refunds:write"]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/Traceparent"
+        - $ref: "#/components/parameters/SignatureInput"
+        - $ref: "#/components/parameters/Signature"
+        - $ref: "#/components/parameters/ContentDigest"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefundRequest"
+            examples:
+              parcial:
+                $ref: "./examples/refund-request.json"
+      responses:
+        "201":
+          description: Devolución aceptada
+          headers:
+            Location:
+              $ref: "#/components/headers/Location"
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Refund"
+              examples:
+                aceptada:
+                  $ref: "./examples/refund.json"
+        "400":
+          $ref: "#/components/responses/SolicitudInvalida"
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+        "403":
+          $ref: "#/components/responses/Prohibido"
+        "404":
+          $ref: "#/components/responses/NoEncontrado"
+        "409":
+          $ref: "#/components/responses/Conflicto"
+        "422":
+          $ref: "#/components/responses/NoProcesable"
+        "503":
+          $ref: "#/components/responses/CoreNoDisponible"
+
+  /payments/{paymentId}/refunds/{refundId}:
+    parameters:
+      - $ref: "#/components/parameters/PaymentId"
+      - name: refundId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^rfd_[A-Za-z0-9]{12,32}$"
+    get:
+      operationId: consultarDevolucion
+      tags: [Devoluciones]
+      summary: Consulta una devolución
+      description: Estado y liquidación de una devolución. Una devolución a tarjeta puede quedar `PENDING` varios días hasta que la franquicia la liquida.
+      security:
+        - mutualTLS: []
+          oauth2: ["refunds:read"]
+      parameters:
+        - $ref: "#/components/parameters/Traceparent"
+      responses:
+        "200":
+          description: Devolución
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Refund"
+              examples:
+                procesada:
+                  $ref: "./examples/refund.json"
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+        "403":
+          $ref: "#/components/responses/Prohibido"
+        "404":
+          $ref: "#/components/responses/NoEncontrado"
+
+  # ───────────────────────────── Métodos de pago ─────────────────────────────
+
+  /payment-methods:
+    get:
+      operationId: listarMetodosDePago
+      tags: [Métodos de pago]
+      summary: Instrumentos habilitados para el aliado y sus límites
+      description: |
+        No toca datos del titular: se consume con `client_credentials`. Los límites son los
+        **vigentes** para este aliado (vienen del core, no de configuración del servicio) y
+        sirven para validar en el checkout antes de crear un consentimiento.
+      security:
+        - mutualTLS: []
+          oauth2: ["payment-methods:read"]
+      parameters:
+        - $ref: "#/components/parameters/Traceparent"
+      responses:
+        "200":
+          description: Métodos de pago
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PaymentMethod"
+              examples:
+                sandbox:
+                  $ref: "./examples/payment-methods.json"
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+
+  # ───────────────────────────── Eventos ─────────────────────────────
+
+  /webhooks:
+    post:
+      operationId: crearWebhook
+      tags: [Eventos]
+      summary: Suscribe una URL a eventos
+      description: |
+        La URL debe ser `https` y responder `2xx` en menos de 5 s. Las entregas van firmadas
+        con la llave de la entidad (RFC 9421; la pública está en `/jwks`) y llevan
+        `Webhook-Id` + `Webhook-Timestamp` para rechazar repeticiones. Sin secretos
+        compartidos: el aliado verifica con la llave pública. Reintentos con retroceso
+        exponencial durante 24 h; después, la suscripción pasa a `SUSPENDED` y se emite el
+        evento `webhook.suspended` al feed.
+      security:
+        - mutualTLS: []
+          oauth2: ["webhooks:manage"]
+      parameters:
+        - $ref: "#/components/parameters/Traceparent"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookRequest"
+      responses:
+        "201":
+          description: Suscripción creada
+          headers:
+            Location:
+              $ref: "#/components/headers/Location"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Webhook"
+              examples:
+                activa:
+                  $ref: "./examples/webhook.json"
+        "400":
+          $ref: "#/components/responses/SolicitudInvalida"
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+    get:
+      operationId: listarWebhooks
+      tags: [Eventos]
+      summary: Lista las suscripciones del aliado
+      description: Incluye las suscripciones `SUSPENDED` por fallos de entrega, para que el aliado las detecte y las reactive creando una nueva.
+      security:
+        - mutualTLS: []
+          oauth2: ["webhooks:manage"]
+      parameters:
+        - $ref: "#/components/parameters/Traceparent"
+      responses:
+        "200":
+          description: Suscripciones
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Webhook"
+              examples:
+                suscripciones:
+                  $ref: "./examples/webhooks-list.json"
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+
+  /webhooks/{webhookId}:
+    parameters:
+      - name: webhookId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^whk_[A-Za-z0-9]{12,32}$"
+    delete:
+      operationId: eliminarWebhook
+      tags: [Eventos]
+      summary: Elimina una suscripción
+      description: Deja de entregar eventos a esa URL de inmediato. Los eventos siguen disponibles en el feed `GET /events`.
+      security:
+        - mutualTLS: []
+          oauth2: ["webhooks:manage"]
+      parameters:
+        - $ref: "#/components/parameters/Traceparent"
+      responses:
+        "204":
+          description: Eliminada
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+        "404":
+          $ref: "#/components/responses/NoEncontrado"
+
+  /events:
+    get:
+      operationId: listarEventos
+      tags: [Eventos]
+      summary: Feed de eventos (pull)
+      description: |
+        Todo evento entregado por webhook también está aquí, en orden, durante 30 días. Es el
+        mecanismo de **recuperación**: un aliado que estuvo caído lee desde su último cursor
+        y queda al día sin pedir reenvíos.
+      security:
+        - mutualTLS: []
+          oauth2: ["payments:read"]
+      parameters:
+        - $ref: "#/components/parameters/Traceparent"
+        - name: type
+          in: query
+          description: Filtra por tipo de evento.
+          schema:
+            $ref: "#/components/schemas/EventType"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Página de eventos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventPage"
+              examples:
+                sandbox:
+                  $ref: "./examples/events-page.json"
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+
+webhooks:
+  eventoDePago:
+    post:
+      operationId: recibirEvento
+      summary: Entrega de un evento al aliado
+      security: []
+      description: |
+        Lo que la entidad envía a la URL suscrita. El aliado debe: (1) verificar `Signature`
+        con la llave pública de `/jwks`; (2) rechazar si `Webhook-Timestamp` tiene más de 5
+        minutos; (3) ignorar `Webhook-Id` ya procesados; (4) responder `2xx` rápido y procesar
+        en segundo plano. Ante cualquier duda, **consultar el recurso** (`GET /payments/{id}`)
+        — el evento avisa, el recurso decide.
+      parameters:
+        - $ref: "#/components/parameters/SignatureInput"
+        - $ref: "#/components/parameters/Signature"
+        - $ref: "#/components/parameters/ContentDigest"
+        - name: Webhook-Id
+          in: header
+          required: true
+          description: Identificador único de la entrega, estable entre reintentos.
+          schema: { type: string }
+        - name: Webhook-Timestamp
+          in: header
+          required: true
+          description: Instante de emisión (RFC 3339). Rechazar si difiere más de 5 min del reloj local.
+          schema: { type: string, format: date-time }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Event"
+      responses:
+        "2XX":
+          description: Recibido. Cualquier otro código dispara reintento.
+
 components:
+  # ───────────────────────────── Seguridad ─────────────────────────────
   securitySchemes:
+    mutualTLS:
+      type: mutualTLS
+      description: |
+        TLS con autenticación mutua en **toda** conexión. El certificado del aliado debe
+        estar vigente, emitido por una entidad de certificación reconocida conforme a la
+        **Ley 527 de 1999**, y corresponder al `client_id` registrado. Suites admitidas:
+        `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256` y `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`
+        (TLS 1.2, exigidas por la circular) y las de TLS 1.3. TLS 1.0 y 1.1 se rechazan.
     oauth2:
       type: oauth2
       description: |
-        OAuth 2.0 bajo el perfil **FAPI 2.0 Security Profile**: PAR obligatorio,
-        PKCE S256, tokens vinculados al remitente (mTLS, RFC 8705) y autenticación de
-        cliente con `private_key_jwt` (PS256 o superior) o mTLS.
+        OAuth 2.0 bajo el perfil **FAPI 2.0 Security Profile**: PAR obligatorio, PKCE S256,
+        tokens **vinculados al certificado** del cliente (RFC 8705, claim `cnf.x5t#S256`),
+        autenticación de cliente con `private_key_jwt` (PS256 o superior) o mTLS, `code` con
+        vida ≤ 60 s, `iss` en la respuesta de autorización (RFC 9207). El token va **solo** en
+        el encabezado `Authorization`; nunca en la URL.
+
+        Los scopes dicen *qué operación*; el consentimiento en `authorization_details`
+        (RFC 9396) dice *cuánto, a quién, desde qué producto y hasta cuándo*. Ambos se
+        validan en cada llamada, y después el core valida la titularidad del producto.
       flows:
         clientCredentials:
           tokenUrl: https://auth.entidad-financiera.example/token
@@ -82,17 +1064,459 @@ components:
         authorizationCode:
           authorizationUrl: https://auth.entidad-financiera.example/authorize
           tokenUrl: https://auth.entidad-financiera.example/token
+          refreshUrl: https://auth.entidad-financiera.example/token
           scopes:
+            "consents:write": Crear y revocar consentimientos de pago
+            "consents:read": Consultar consentimientos
             "payments:initiate": Iniciar un cobro contra un consentimiento autorizado
-            "payments:read": Consultar el estado de un pago
+            "payments:read": Consultar pagos y leer el feed de eventos
             "payments:capture": Capturar una autorización de tarjeta de crédito
             "payments:cancel": Anular una autorización no capturada
             "refunds:write": Emitir devoluciones
             "refunds:read": Consultar devoluciones
-            "consents:write": Crear y revocar consentimientos de pago
-            "consents:read": Consultar consentimientos
 
+  # ───────────────────────────── Parámetros ─────────────────────────────
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        UUID generado por el aliado, único por intento de operación. Misma clave + mismo
+        cuerpo dentro de 24 h → se devuelve la respuesta original con
+        `Idempotency-Replayed: true` y **sin** volver a llamar al core. Misma clave + cuerpo
+        distinto → `422`. Sin clave → `400`. Es la única forma segura de reintentar.
+      schema:
+        type: string
+        format: uuid
+      example: "0f8fad5b-d9cb-469f-a165-70867728950e"
+    Traceparent:
+      name: traceparent
+      in: header
+      required: false
+      description: W3C Trace Context. Si viene, se propaga hasta el BUS y vuelve en `traceId` de cualquier error.
+      schema:
+        type: string
+        pattern: "^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+      example: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    SignatureInput:
+      name: Signature-Input
+      in: header
+      required: true
+      description: RFC 9421. Componentes cubiertos por la firma (`@method`, `@target-uri`, `content-digest`, `idempotency-key`, `created`, `keyid`).
+      schema: { type: string }
+      example: 'sig1=("@method" "@target-uri" "content-digest" "idempotency-key");created=1757548327;keyid="aliado-demo-001-2026"'
+    Signature:
+      name: Signature
+      in: header
+      required: true
+      description: RFC 9421. Firma PS256 sobre los componentes declarados, con la llave privada del aliado (pública en su `jwks_uri`). Da **no repudio** a cada orden.
+      schema: { type: string }
+      example: "sig1=:MEUCIQDx8n...:"
+    ContentDigest:
+      name: Content-Digest
+      in: header
+      required: true
+      description: RFC 9530. Resumen SHA-256 del cuerpo, cubierto por la firma.
+      schema: { type: string }
+      example: "sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:"
+    ConsentId:
+      name: consentId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^cns_[A-Za-z0-9]{12,32}$"
+      example: "cns_7Kd9mQ2pLx4Rt8Vw"
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^pay_[A-Za-z0-9]{12,32}$"
+      example: "pay_3Hn8Zc1Qw7Lp5Ky2"
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Cursor opaco devuelto en `nextCursor` de la página anterior.
+      schema: { type: string, maxLength: 512 }
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+
+  # ───────────────────────────── Encabezados ─────────────────────────────
+  headers:
+    Location:
+      description: URL del recurso creado.
+      schema: { type: string, format: uri-reference }
+    IdempotencyReplayed:
+      description: "`true` cuando la respuesta se sirvió desde el registro de idempotencia sin tocar el core."
+      schema: { type: boolean }
+    RetryAfter:
+      description: Segundos sugeridos antes de reintentar.
+      schema: { type: integer, minimum: 1 }
+    RateLimitLimit:
+      description: Cuota de la ventana actual para este aliado y scope.
+      schema: { type: integer }
+    RateLimitRemaining:
+      description: Peticiones restantes en la ventana.
+      schema: { type: integer }
+    RateLimitReset:
+      description: Segundos hasta que la ventana se reinicia.
+      schema: { type: integer }
+
+  # ───────────────────────────── Respuestas de error ─────────────────────────────
+  responses:
+    SolicitudInvalida:
+      description: Cuerpo o encabezados inválidos (esquema, `Idempotency-Key` ausente, firma malformada).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+          examples:
+            sinIdempotencyKey:
+              $ref: "./examples/error-sin-idempotency-key.json"
+    NoAutenticado:
+      description: Falta el token, está vencido, o no está vinculado al certificado presentado.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+          examples:
+            tokenSinVinculo:
+              $ref: "./examples/error-token-sin-vinculo.json"
+    Prohibido:
+      description: |
+        El token no autoriza esta operación: scope insuficiente, el consentimiento en
+        `authorization_details` no coincide con el pago, el consentimiento está revocado o
+        vencido, o el recurso pertenece a otro aliado.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+          examples:
+            montoNoConsentido:
+              $ref: "./examples/error-monto-no-consentido.json"
+    NoEncontrado:
+      description: El recurso no existe **para este aliado**. Se responde igual si existe pero es de otro (no se filtra existencia).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+    Conflicto:
+      description: La transición no es válida para el estado actual del recurso (p. ej. capturar un pago `CANCELLED`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+          examples:
+            estadoInvalido:
+              $ref: "./examples/error-estado-invalido.json"
+    NoProcesable:
+      description: Sintácticamente válido pero rechazado por regla de negocio o por reutilizar `Idempotency-Key` con un cuerpo distinto.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+          examples:
+            idempotencyKeyReutilizada:
+              $ref: "./examples/error-idempotency-key-reutilizada.json"
+    LimiteExcedido:
+      description: Cuota del aliado agotada para este scope.
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+        RateLimit-Limit:
+          $ref: "#/components/headers/RateLimitLimit"
+        RateLimit-Remaining:
+          $ref: "#/components/headers/RateLimitRemaining"
+        RateLimit-Reset:
+          $ref: "#/components/headers/RateLimitReset"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+    CoreNoDisponible:
+      description: |
+        El core no está disponible y la orden **no se envió** (circuito abierto o fallo
+        antes de invocar al BUS). Es seguro reintentar tras `Retry-After` con la **misma**
+        `Idempotency-Key`. Este código nunca se usa cuando la orden ya viajó al core.
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+          examples:
+            circuitoAbierto:
+              $ref: "./examples/error-core-no-disponible.json"
+    ErrorOAuth:
+      description: Error del servidor de autorización en formato RFC 6749 (`error`, `error_description`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorOAuth"
+
+  # ───────────────────────────── Esquemas ─────────────────────────────
   schemas:
+    # ---- Plano de confianza ----
+    ConfiguracionServidorAutorizacion:
+      type: object
+      description: Subconjunto relevante de los metadatos RFC 8414 / OpenID Discovery.
+      required:
+        - issuer
+        - pushed_authorization_request_endpoint
+        - require_pushed_authorization_requests
+        - authorization_endpoint
+        - token_endpoint
+        - jwks_uri
+        - registration_endpoint
+        - backchannel_authentication_endpoint
+        - token_endpoint_auth_methods_supported
+        - token_endpoint_auth_signing_alg_values_supported
+        - code_challenge_methods_supported
+        - tls_client_certificate_bound_access_tokens
+        - authorization_details_types_supported
+        - scopes_supported
+        - grant_types_supported
+      properties:
+        issuer: { type: string, format: uri }
+        pushed_authorization_request_endpoint: { type: string, format: uri }
+        require_pushed_authorization_requests: { type: boolean, const: true }
+        authorization_endpoint: { type: string, format: uri }
+        token_endpoint: { type: string, format: uri }
+        jwks_uri: { type: string, format: uri }
+        registration_endpoint: { type: string, format: uri }
+        backchannel_authentication_endpoint: { type: string, format: uri }
+        introspection_endpoint: { type: string, format: uri }
+        revocation_endpoint: { type: string, format: uri }
+        token_endpoint_auth_methods_supported:
+          type: array
+          items: { type: string, enum: [private_key_jwt, tls_client_auth] }
+        token_endpoint_auth_signing_alg_values_supported:
+          type: array
+          items: { type: string, enum: [PS256, PS384, PS512, ES256, ES384] }
+        code_challenge_methods_supported:
+          type: array
+          items: { type: string, const: S256 }
+        tls_client_certificate_bound_access_tokens: { type: boolean, const: true }
+        authorization_details_types_supported:
+          type: array
+          items: { type: string }
+        scopes_supported:
+          type: array
+          items: { type: string }
+        grant_types_supported:
+          type: array
+          items: { type: string }
+        authorization_response_iss_parameter_supported: { type: boolean }
+
+    JwkSet:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          items:
+            type: object
+            required: [kty, kid, use, alg]
+            properties:
+              kty: { type: string, enum: [RSA, EC] }
+              kid: { type: string }
+              use: { type: string, enum: [sig] }
+              alg: { type: string, enum: [PS256, PS384, PS512, ES256, ES384] }
+              n: { type: string }
+              e: { type: string }
+              crv: { type: string }
+              x: { type: string }
+              y: { type: string }
+              x5c:
+                type: array
+                items: { type: string }
+
+    RegistroClienteRequest:
+      type: object
+      additionalProperties: false
+      required: [software_statement, redirect_uris, jwks_uri, token_endpoint_auth_method, scope]
+      properties:
+        software_statement:
+          type: string
+          description: JWT firmado por el directorio (o por la entidad durante el alta) que identifica al aliado y sus capacidades.
+        redirect_uris:
+          type: array
+          minItems: 1
+          items: { type: string, format: uri }
+        jwks_uri:
+          type: string
+          format: uri
+          description: Donde el aliado publica sus llaves públicas (para `private_key_jwt` y firma de mensajes).
+        token_endpoint_auth_method:
+          type: string
+          enum: [private_key_jwt, tls_client_auth]
+        scope:
+          type: string
+          description: Scopes solicitados, separados por espacio. Se conceden solo los aprobados en el alta.
+        backchannel_token_delivery_mode:
+          type: string
+          enum: [poll, ping]
+        backchannel_client_notification_endpoint:
+          type: string
+          format: uri
+
+    RegistroClienteResponse:
+      type: object
+      required: [client_id, client_id_issued_at, redirect_uris, jwks_uri, token_endpoint_auth_method, scope]
+      properties:
+        client_id: { type: string }
+        client_id_issued_at: { type: integer }
+        redirect_uris:
+          type: array
+          items: { type: string, format: uri }
+        jwks_uri: { type: string, format: uri }
+        token_endpoint_auth_method: { type: string }
+        scope: { type: string, description: Scopes efectivamente concedidos. }
+        registration_client_uri: { type: string, format: uri }
+
+    ParRequest:
+      type: object
+      required: [client_id, response_type, redirect_uri, scope, code_challenge, code_challenge_method, authorization_details]
+      properties:
+        client_id: { type: string }
+        response_type: { type: string, const: code }
+        redirect_uri: { type: string, format: uri }
+        scope: { type: string, examples: ["consents:read payments:initiate payments:read"] }
+        code_challenge: { type: string }
+        code_challenge_method: { type: string, const: S256 }
+        authorization_details:
+          type: string
+          description: JSON serializado de un arreglo de `AuthorizationDetail` (RFC 9396) con el consentimiento exacto.
+        client_assertion_type:
+          type: string
+          const: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+        client_assertion:
+          type: string
+          description: JWT `private_key_jwt` firmado con PS256+, `aud` = issuer exacto del servidor.
+
+    ParResponse:
+      type: object
+      required: [request_uri, expires_in]
+      properties:
+        request_uri:
+          type: string
+          description: Referencia de un solo uso para `/authorize?client_id=…&request_uri=…`.
+        expires_in:
+          type: integer
+          description: Segundos de validez (≤ 60).
+
+    CibaRequest:
+      type: object
+      required: [client_id, scope, login_hint, authorization_details, binding_message]
+      properties:
+        client_id: { type: string }
+        scope: { type: string }
+        login_hint:
+          type: string
+          description: Identificador del titular que la entidad ya conoce. Nunca credenciales.
+        authorization_details:
+          type: string
+          description: JSON serializado con el consentimiento exacto (RFC 9396).
+        binding_message:
+          type: string
+          maxLength: 20
+          description: Código corto que se muestra en el punto de venta y en la app del titular para que verifique que autoriza *esa* operación.
+        requested_expiry:
+          type: integer
+          description: Segundos que el titular tiene para responder.
+        client_assertion_type:
+          type: string
+        client_assertion:
+          type: string
+
+    CibaResponse:
+      type: object
+      required: [auth_req_id, expires_in]
+      properties:
+        auth_req_id: { type: string }
+        expires_in: { type: integer }
+        interval:
+          type: integer
+          description: Segundos mínimos entre consultas a `/token` en modo *poll*.
+
+    TokenRequest:
+      type: object
+      required: [grant_type]
+      properties:
+        grant_type:
+          type: string
+          enum:
+            - client_credentials
+            - authorization_code
+            - "urn:openid:params:grant-type:ciba"
+            - refresh_token
+        code: { type: string }
+        code_verifier: { type: string }
+        redirect_uri: { type: string, format: uri }
+        auth_req_id: { type: string }
+        refresh_token: { type: string }
+        scope: { type: string }
+        client_id: { type: string }
+        client_assertion_type: { type: string }
+        client_assertion: { type: string }
+
+    TokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in, scope]
+      properties:
+        access_token:
+          type: string
+          description: JWT PS256+, vinculado al certificado (`cnf.x5t#S256`).
+        token_type: { type: string, const: Bearer }
+        expires_in: { type: integer, description: "Segundos. Corto por diseño (≤ 600)." }
+        scope: { type: string }
+        refresh_token: { type: string }
+        authorization_details:
+          type: array
+          description: Lo que el titular autorizó, tal como quedó atado al token.
+          items:
+            $ref: "#/components/schemas/AuthorizationDetail"
+
+    AuthorizationDetail:
+      type: object
+      description: RFC 9396. Ata el token a un consentimiento concreto.
+      required: [type, consentId, actions]
+      properties:
+        type:
+          type: string
+          const: payment_consent
+        consentId:
+          type: string
+          pattern: "^cns_[A-Za-z0-9]{12,32}$"
+        actions:
+          type: array
+          items:
+            type: string
+            enum: [initiate, read, capture, cancel, refund]
+        instrumentType:
+          $ref: "#/components/schemas/InstrumentType"
+        amount:
+          $ref: "#/components/schemas/Amount"
+        creditorName:
+          type: string
+
+    ErrorOAuth:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          examples: [invalid_request, invalid_client, invalid_grant, invalid_scope, authorization_pending]
+        error_description: { type: string }
+
     ConnectionTestResult:
       type: object
       additionalProperties: false
@@ -109,22 +1533,574 @@ components:
         certificateThumbprint:
           type: string
           description: Huella SHA-256 del certificado de transporte, en base64url (`x5t#S256`).
-          examples: ["S3XZ0oXk8_2vG1Q9r5wq4bZk8Yl0mN7pQ2sT4uV6wX8"]
         tokenBoundToCertificate:
           type: boolean
           description: |
-            `true` si el `cnf.x5t#S256` del token coincide con la huella del certificado
-            de esta conexión (RFC 8705). Si es `false`, el token no es de este canal.
+            `true` si el `cnf.x5t#S256` del token coincide con la huella del certificado de
+            esta conexión (RFC 8705). Si es `false`, el token no es de este canal.
         effectiveScopes:
           type: array
           items: { type: string }
-          description: Scopes que quedaron efectivos tras la validación.
-          examples: [["connection:test"]]
         serverTime:
           type: string
           format: date-time
           description: Hora del servidor, para detectar desfases de reloj antes de firmar.
 
+    # ---- Tipos comunes ----
+    Amount:
+      type: object
+      description: ISO 20022 `ActiveOrHistoricCurrencyAndAmount`. Cadena decimal, nunca flotante.
+      additionalProperties: false
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          pattern: "^[0-9]{1,15}(\\.[0-9]{1,2})?$"
+          description: Hasta 2 decimales. El separador es punto.
+          examples: ["150000.00"]
+        currency:
+          type: string
+          enum: [COP]
+          description: ISO 4217. Solo pesos colombianos en esta versión.
+
+    InstrumentType:
+      type: string
+      enum: [SAVINGS_ACCOUNT, CREDIT_CARD]
+
+    Instrument:
+      type: object
+      description: |
+        Producto del titular contra el que se cobra, **tal como lo eligió en la entidad**.
+        Nunca incluye el número completo: `productReference` es una referencia opaca y
+        `maskedNumber` sirve solo para mostrar.
+      required: [type, productReference, maskedNumber]
+      properties:
+        type:
+          $ref: "#/components/schemas/InstrumentType"
+        productReference:
+          type: string
+          description: Referencia opaca y estable del producto, válida solo para este aliado.
+          examples: ["prd_9Qz2Lm7Xw4Kd8Vn1"]
+        maskedNumber:
+          type: string
+          pattern: "^\\*+[0-9]{4}$"
+          examples: ["****4821"]
+        brand:
+          type: string
+          description: Solo tarjeta de crédito.
+          enum: [VISA, MASTERCARD, AMEX, DINERS]
+
+    Identification:
+      type: object
+      description: ISO 20022 `PartyIdentification` — identificación colombiana.
+      additionalProperties: false
+      required: [type, number]
+      properties:
+        type:
+          type: string
+          enum: [NIT, CC, CE, PA, TI]
+        number:
+          type: string
+          pattern: "^[0-9A-Za-z-]{4,20}$"
+
+    Creditor:
+      type: object
+      description: Beneficiario del cobro — normalmente el propio aliado o el comercio que representa.
+      additionalProperties: false
+      required: [name, identification]
+      properties:
+        name:
+          type: string
+          maxLength: 140
+          examples: ["Tienda Ejemplo S.A.S."]
+        identification:
+          $ref: "#/components/schemas/Identification"
+        merchantCategoryCode:
+          type: string
+          pattern: "^[0-9]{4}$"
+          description: MCC ISO 18245. Requerido para tarjeta de crédito.
+
+    ThirdParty:
+      type: object
+      description: Identificación del aliado tal como se muestra al titular (razón social y domicilio), tomada del registro — no del cuerpo de la petición.
+      required: [name, domicile]
+      properties:
+        name: { type: string }
+        domicile: { type: string }
+
+    Recurrence:
+      type: object
+      description: "Solo consentimientos `RECURRING`. Topes explícitos: la norma prohíbe autorizaciones abiertas."
+      additionalProperties: false
+      required: [frequency, maxAmountPerPayment, maxAmountPerPeriod, validUntil]
+      properties:
+        frequency:
+          type: string
+          enum: [WEEKLY, BIWEEKLY, MONTHLY, QUARTERLY]
+        maxAmountPerPayment:
+          $ref: "#/components/schemas/Amount"
+        maxAmountPerPeriod:
+          $ref: "#/components/schemas/Amount"
+        validUntil:
+          type: string
+          format: date
+          description: Fin de la serie. Nunca abierto.
+
+    # ---- Consentimientos ----
+    PaymentConsentRequest:
+      type: object
+      additionalProperties: false
+      required: [type, instrumentType, amount, creditor, purpose, expiresAt, remittanceInformation]
+      properties:
+        type:
+          type: string
+          enum: [SINGLE, RECURRING]
+        instrumentType:
+          $ref: "#/components/schemas/InstrumentType"
+        amount:
+          description: Monto exacto (`SINGLE`) o monto del primer cobro (`RECURRING`).
+          $ref: "#/components/schemas/Amount"
+        recurrence:
+          $ref: "#/components/schemas/Recurrence"
+        creditor:
+          $ref: "#/components/schemas/Creditor"
+        purpose:
+          type: string
+          maxLength: 200
+          description: Finalidad **específica** que verá el titular. Obligatoria por norma; nunca genérica.
+          examples: ["Pago de la orden 48213 — suscripción anual"]
+        expiresAt:
+          type: string
+          format: date-time
+          description: Hasta cuándo puede usarse el consentimiento (tiempo de la finalidad). Máximo 30 días para `SINGLE`.
+        remittanceInformation:
+          type: string
+          maxLength: 140
+          description: Referencia que verá el titular en su extracto.
+        customerHint:
+          type: object
+          description: Solo para flujo `DECOUPLED` (CIBA). Un dato que el titular ya entregó al aliado y que la entidad reconoce. Nunca credenciales.
+          additionalProperties: false
+          properties:
+            identification:
+              $ref: "#/components/schemas/Identification"
+        authorizationMode:
+          type: string
+          enum: [REDIRECT, DECOUPLED]
+          default: REDIRECT
+
+    PaymentConsentStatus:
+      type: string
+      enum: [AWAITING_AUTHORISATION, AUTHORISED, REJECTED, REVOKED, EXPIRED, CONSUMED]
+      description: |
+        `AWAITING_AUTHORISATION` → `AUTHORISED` cuando el titular confirma en la entidad;
+        `REJECTED` si deniega; `EXPIRED` si vence sin respuesta; `REVOKED` por el aliado o el
+        titular; `CONSUMED` cuando un consentimiento `SINGLE` ya respaldó su pago.
+
+    PaymentConsent:
+      type: object
+      required: [consentId, status, type, instrumentType, amount, creditor, thirdParty, purpose, expiresAt, remittanceInformation, authorization, createdAt, links]
+      properties:
+        consentId:
+          type: string
+          pattern: "^cns_[A-Za-z0-9]{12,32}$"
+        status:
+          $ref: "#/components/schemas/PaymentConsentStatus"
+        type:
+          type: string
+          enum: [SINGLE, RECURRING]
+        instrumentType:
+          $ref: "#/components/schemas/InstrumentType"
+        amount:
+          $ref: "#/components/schemas/Amount"
+        recurrence:
+          $ref: "#/components/schemas/Recurrence"
+        creditor:
+          $ref: "#/components/schemas/Creditor"
+        thirdParty:
+          $ref: "#/components/schemas/ThirdParty"
+        purpose: { type: string }
+        expiresAt: { type: string, format: date-time }
+        remittanceInformation: { type: string }
+        instrument:
+          description: "Presente desde `AUTHORISED`: el producto que el titular eligió."
+          $ref: "#/components/schemas/Instrument"
+        authorization:
+          type: object
+          description: Cómo continuar para obtener la autorización del titular.
+          required: [mode]
+          properties:
+            mode:
+              type: string
+              enum: [REDIRECT, DECOUPLED]
+            authorizationDetails:
+              description: Lo que el aliado debe enviar tal cual en `authorization_details` del PAR o del CIBA.
+              $ref: "#/components/schemas/AuthorizationDetail"
+        createdAt: { type: string, format: date-time }
+        authorisedAt: { type: string, format: date-time }
+        links:
+          type: object
+          required: [self]
+          properties:
+            self: { type: string, format: uri-reference }
+
+    # ---- Pagos ----
+    PaymentStatus:
+      type: string
+      enum: [PENDING, AUTHORIZED, CAPTURED, SETTLED, PARTIALLY_REFUNDED, REFUNDED, REJECTED, CANCELLED, EXPIRED, FAILED]
+      description: |
+        Ahorros: `PENDING` → `CAPTURED` → `SETTLED`. Tarjeta: `PENDING` → `AUTHORIZED` →
+        `CAPTURED` → `SETTLED`. Desde `CAPTURED`/`SETTLED`: `PARTIALLY_REFUNDED` → `REFUNDED`.
+        Terminales sin dinero movido: `REJECTED` (el core dijo no), `CANCELLED` (anulación),
+        `EXPIRED` (autorización vencida sin captura), `FAILED` (error técnico confirmado —
+        nunca se usa mientras haya duda; para eso está `PENDING`).
+
+    PaymentRequest:
+      type: object
+      additionalProperties: false
+      required: [consentId, amount]
+      properties:
+        consentId:
+          type: string
+          pattern: "^cns_[A-Za-z0-9]{12,32}$"
+        amount:
+          description: Debe coincidir con el consentimiento (`SINGLE`) o respetar sus topes (`RECURRING`).
+          $ref: "#/components/schemas/Amount"
+        remittanceInformation:
+          type: string
+          maxLength: 140
+          description: Si se omite, se usa la del consentimiento.
+        installments:
+          type: integer
+          minimum: 1
+          maximum: 36
+          default: 1
+          description: Número de cuotas. Solo tarjeta de crédito.
+        captureMode:
+          type: string
+          enum: [AUTOMATIC, MANUAL]
+          default: AUTOMATIC
+          description: Solo tarjeta. `MANUAL` deja el pago en `AUTHORIZED` hasta que el aliado capture (p. ej. al despachar).
+        metadata:
+          type: object
+          description: Hasta 10 pares clave-valor del aliado (p. ej. su número de orden). Se devuelven tal cual; nunca se interpretan ni se muestran al titular.
+          maxProperties: 10
+          additionalProperties:
+            type: string
+            maxLength: 200
+
+    Settlement:
+      type: object
+      description: Información de liquidación, cuando aplica.
+      properties:
+        rail:
+          type: string
+          enum: [ON_US, INSTANT, ACH, CARD_NETWORK]
+          description: Por dónde se movió el dinero. `INSTANT` cubre pagos inmediatos interoperados.
+        reference:
+          type: string
+          description: Referencia del core o del riel, útil para conciliación con el extracto.
+        settledAt:
+          type: string
+          format: date-time
+        expectedAt:
+          type: string
+          format: date-time
+          description: Estimación cuando aún no está liquidado (p. ej. ciclo ACH).
+
+    Payment:
+      type: object
+      required: [paymentId, consentId, status, instrument, amount, capturedAmount, refundedAmount, creditor, remittanceInformation, createdAt, updatedAt, links]
+      properties:
+        paymentId:
+          type: string
+          pattern: "^pay_[A-Za-z0-9]{12,32}$"
+        consentId:
+          type: string
+          pattern: "^cns_[A-Za-z0-9]{12,32}$"
+        status:
+          $ref: "#/components/schemas/PaymentStatus"
+        statusReason:
+          type: object
+          description: Presente en `REJECTED`, `FAILED` y `PENDING`. `code` viene del catálogo público; nunca expone códigos internos del core.
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              examples: [INSUFFICIENT_FUNDS, LIMIT_EXCEEDED, CORE_TIMEOUT, CARD_DECLINED, PRODUCT_BLOCKED]
+            message:
+              type: string
+        instrument:
+          $ref: "#/components/schemas/Instrument"
+        amount:
+          $ref: "#/components/schemas/Amount"
+        capturedAmount:
+          $ref: "#/components/schemas/Amount"
+        refundedAmount:
+          $ref: "#/components/schemas/Amount"
+        creditor:
+          $ref: "#/components/schemas/Creditor"
+        remittanceInformation: { type: string }
+        installments: { type: integer }
+        captureMode:
+          type: string
+          enum: [AUTOMATIC, MANUAL]
+        settlement:
+          $ref: "#/components/schemas/Settlement"
+        authorizationExpiresAt:
+          type: string
+          format: date-time
+          description: "Solo tarjeta en `AUTHORIZED`: cuándo se libera el cupo si no se captura."
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        links:
+          type: object
+          required: [self]
+          properties:
+            self: { type: string, format: uri-reference }
+            consent: { type: string, format: uri-reference }
+            captures: { type: string, format: uri-reference }
+            refunds: { type: string, format: uri-reference }
+
+    PaymentPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Payment"
+        nextCursor:
+          type: [string, "null"]
+          description: "`null` cuando no hay más páginas."
+
+    # ---- Capturas, anulaciones, devoluciones ----
+    CaptureRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        amount:
+          description: Si se omite, captura el saldo autorizado restante.
+          $ref: "#/components/schemas/Amount"
+        remittanceInformation:
+          type: string
+          maxLength: 140
+
+    Capture:
+      type: object
+      required: [captureId, paymentId, amount, status, createdAt]
+      properties:
+        captureId:
+          type: string
+          pattern: "^cap_[A-Za-z0-9]{12,32}$"
+        paymentId:
+          type: string
+          pattern: "^pay_[A-Za-z0-9]{12,32}$"
+        amount:
+          $ref: "#/components/schemas/Amount"
+        status:
+          type: string
+          enum: [PROCESSED, PENDING, FAILED]
+        createdAt: { type: string, format: date-time }
+
+    CancellationRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          enum: [CUSTOMER_REQUEST, ORDER_CANCELLED, DUPLICATE, OTHER]
+        comment:
+          type: string
+          maxLength: 200
+
+    Cancellation:
+      type: object
+      required: [cancellationId, paymentId, status, reason, createdAt]
+      properties:
+        cancellationId:
+          type: string
+          pattern: "^cnl_[A-Za-z0-9]{12,32}$"
+        paymentId:
+          type: string
+          pattern: "^pay_[A-Za-z0-9]{12,32}$"
+        status:
+          type: string
+          enum: [PROCESSED, FAILED]
+        reason: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    RefundRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        amount:
+          description: Si se omite, devuelve todo lo capturado y aún no devuelto.
+          $ref: "#/components/schemas/Amount"
+        reason:
+          type: string
+          enum: [CUSTOMER_REQUEST, DUPLICATE, FRAUD, PRODUCT_NOT_DELIVERED, OTHER]
+        remittanceInformation:
+          type: string
+          maxLength: 140
+
+    Refund:
+      type: object
+      required: [refundId, paymentId, amount, status, reason, createdAt, links]
+      properties:
+        refundId:
+          type: string
+          pattern: "^rfd_[A-Za-z0-9]{12,32}$"
+        paymentId:
+          type: string
+          pattern: "^pay_[A-Za-z0-9]{12,32}$"
+        amount:
+          $ref: "#/components/schemas/Amount"
+        status:
+          type: string
+          enum: [PENDING, PROCESSED, REJECTED, FAILED]
+          description: "`PENDING` mientras el riel confirma (p. ej. devolución a tarjeta, que la franquicia liquida en días)."
+        reason: { type: string }
+        settlement:
+          $ref: "#/components/schemas/Settlement"
+        createdAt: { type: string, format: date-time }
+        links:
+          type: object
+          required: [self, payment]
+          properties:
+            self: { type: string, format: uri-reference }
+            payment: { type: string, format: uri-reference }
+
+    # ---- Métodos de pago ----
+    PaymentMethod:
+      type: object
+      required: [instrumentType, enabled, currency, limits, features]
+      properties:
+        instrumentType:
+          $ref: "#/components/schemas/InstrumentType"
+        enabled: { type: boolean }
+        currency: { type: string, enum: [COP] }
+        limits:
+          type: object
+          required: [minAmount, maxAmountPerPayment, maxAmountPerDay]
+          properties:
+            minAmount:
+              $ref: "#/components/schemas/Amount"
+            maxAmountPerPayment:
+              $ref: "#/components/schemas/Amount"
+            maxAmountPerDay:
+              $ref: "#/components/schemas/Amount"
+        features:
+          type: object
+          required: [recurring, partialCapture, partialRefund, installments, decoupledAuthorization]
+          properties:
+            recurring: { type: boolean }
+            partialCapture: { type: boolean }
+            partialRefund: { type: boolean }
+            installments: { type: boolean }
+            decoupledAuthorization: { type: boolean }
+        settlementWindow:
+          type: string
+          description: Descripción legible de la ventana de liquidación (p. ej. "Inmediata" o "Ciclo ACH, día hábil siguiente").
+
+    # ---- Eventos ----
+    EventType:
+      type: string
+      enum:
+        - consent.authorised
+        - consent.rejected
+        - consent.revoked
+        - consent.expired
+        - payment.captured
+        - payment.settled
+        - payment.rejected
+        - payment.failed
+        - payment.expired
+        - refund.processed
+        - refund.rejected
+        - webhook.suspended
+
+    Event:
+      type: object
+      required: [eventId, type, occurredAt, resource]
+      properties:
+        eventId:
+          type: string
+          pattern: "^evt_[A-Za-z0-9]{12,32}$"
+        type:
+          $ref: "#/components/schemas/EventType"
+        occurredAt: { type: string, format: date-time }
+        resource:
+          type: object
+          description: Qué cambió. El aliado consulta el recurso; el evento no reemplaza al `GET`.
+          required: [type, id, href]
+          properties:
+            type:
+              type: string
+              enum: [payment, consent, refund, webhook]
+            id: { type: string }
+            href: { type: string, format: uri-reference }
+        data:
+          type: object
+          description: Resumen mínimo (estado nuevo, monto). Nunca datos del titular.
+          properties:
+            status: { type: string }
+            amount:
+              $ref: "#/components/schemas/Amount"
+
+    EventPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Event"
+        nextCursor:
+          type: [string, "null"]
+
+    WebhookRequest:
+      type: object
+      additionalProperties: false
+      required: [url, events]
+      properties:
+        url:
+          type: string
+          format: uri
+          pattern: "^https://"
+        events:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/EventType"
+
+    Webhook:
+      type: object
+      required: [webhookId, url, events, status, createdAt]
+      properties:
+        webhookId:
+          type: string
+          pattern: "^whk_[A-Za-z0-9]{12,32}$"
+        url: { type: string, format: uri }
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/EventType"
+        status:
+          type: string
+          enum: [ACTIVE, SUSPENDED]
+        signingKeyId:
+          type: string
+          description: "`kid` de `/jwks` con el que se firman las entregas."
+        createdAt: { type: string, format: date-time }
+
+    # ---- Errores ----
     ProblemDetail:
       type: object
       description: Error en formato RFC 9457.
@@ -133,33 +2109,27 @@ components:
         type:
           type: string
           format: uri
-          description: URI del catálogo público de errores.
+          description: URI del catálogo público de errores; cada entrada dice qué hacer.
           examples: ["https://developer.entidad-financiera.example/errors/no-autenticado"]
         title:
           type: string
-          examples: ["No autenticado"]
         status:
           type: integer
-          examples: [401]
         detail:
           type: string
-          description: Explicación accionable, siempre libre de datos sensibles.
+          description: Explicación accionable, siempre libre de datos sensibles y de códigos internos del core.
         instance:
           type: string
-          description: Referencia URI de la ocurrencia concreta del problema (RFC 9457).
+          description: Referencia URI de la ocurrencia concreta del problema.
         traceId:
           type: string
           description: Identificador de traza para soporte (W3C Trace Context).
-          examples: ["4bf92f3577b34da6a3ce929d0e0e4736"]
-
-  responses:
-    NoAutenticado:
-      description: Falta el token, está vencido o no está vinculado al certificado presentado.
-      content:
-        application/problem+json:
-          schema:
-            $ref: "#/components/schemas/ProblemDetail"
-          examples:
-            tokenSinVinculo:
-              $ref: "./examples/error-token-sin-vinculo.json"
-
+        errors:
+          type: array
+          description: Detalle por campo en errores de validación.
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }

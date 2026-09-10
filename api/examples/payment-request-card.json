@@ -1,0 +1,15 @@
+{
+  "summary": "Autorización de tarjeta con captura manual, 3 cuotas",
+  "value": {
+    "consentId": "cns_2Bx6Wn9Qr4Tk7Mp1",
+    "amount": {
+      "amount": "890000.00",
+      "currency": "COP"
+    },
+    "installments": 3,
+    "captureMode": "MANUAL",
+    "metadata": {
+      "orderId": "48214"
+    }
+  }
+}

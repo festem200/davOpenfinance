@@ -1,0 +1,38 @@
+{
+  "summary": "Página del feed de eventos",
+  "value": {
+    "items": [
+      {
+        "eventId": "evt_4Tb8Kx2Qw6Ln9Pd3",
+        "type": "consent.authorised",
+        "occurredAt": "2026-09-10T14:31:48Z",
+        "resource": {
+          "type": "consent",
+          "id": "cns_7Kd9mQ2pLx4Rt8Vw",
+          "href": "/payment-consents/cns_7Kd9mQ2pLx4Rt8Vw"
+        },
+        "data": {
+          "status": "AUTHORISED"
+        }
+      },
+      {
+        "eventId": "evt_9Rn2Vp7Kx4Wt1Qm6",
+        "type": "payment.settled",
+        "occurredAt": "2026-09-10T14:32:07Z",
+        "resource": {
+          "type": "payment",
+          "id": "pay_3Hn8Zc1Qw7Lp5Ky2",
+          "href": "/payments/pay_3Hn8Zc1Qw7Lp5Ky2"
+        },
+        "data": {
+          "status": "SETTLED",
+          "amount": {
+            "amount": "150000.00",
+            "currency": "COP"
+          }
+        }
+      }
+    ],
+    "nextCursor": null
+  }
+}

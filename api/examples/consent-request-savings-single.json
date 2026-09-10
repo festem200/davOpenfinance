@@ -1,0 +1,23 @@
+{
+  "summary": "Cobro único contra cuenta de ahorros",
+  "value": {
+    "type": "SINGLE",
+    "instrumentType": "SAVINGS_ACCOUNT",
+    "amount": {
+      "amount": "150000.00",
+      "currency": "COP"
+    },
+    "creditor": {
+      "name": "Tienda Ejemplo S.A.S.",
+      "identification": {
+        "type": "NIT",
+        "number": "900123456-7"
+      },
+      "merchantCategoryCode": "5732"
+    },
+    "purpose": "Pago de la orden 48213 — suscripción anual",
+    "expiresAt": "2026-09-11T14:30:00Z",
+    "remittanceInformation": "TIENDA EJEMPLO ORDEN 48213",
+    "authorizationMode": "REDIRECT"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "summary": "Llaves públicas de la entidad",
+  "value": {
+    "keys": [
+      {
+        "kty": "RSA",
+        "kid": "entidad-2026-09",
+        "use": "sig",
+        "alg": "PS256",
+        "n": "sXchDaQebHnPiGvyDOAT4saGEUetSyo9MKLOoWFsueri23bOdgWp4Dy4WsJHK9V6uSPVKt3MSQ1pjIrgGdDlaX4Pe9w0nI9Mk8W2ZsnKmA5g5b0R3yEwVjbpVpOUYDl-K3wJnAmEQG5eL0V0lfVvW6KlSf9qiwNiskDi4-_2VLUoQzZLJIoYc5uk1JJtUfz1Q",
+        "e": "AQAB"
+      }
+    ]
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "summary": "El core no respondió a tiempo: el pago existe y se resolverá por consulta de referencia",
+  "value": {
+    "paymentId": "pay_5Pz1Rk8Md3Qy6Hc9",
+    "consentId": "cns_7Kd9mQ2pLx4Rt8Vw",
+    "status": "PENDING",
+    "statusReason": {
+      "code": "CORE_TIMEOUT",
+      "message": "La orden se envió al core y aún no hay confirmación. Consulta GET /payments/{paymentId} o espera el evento payment.settled / payment.rejected. No reintentes el POST."
+    },
+    "instrument": {
+      "type": "SAVINGS_ACCOUNT",
+      "productReference": "prd_9Qz2Lm7Xw4Kd8Vn1",
+      "maskedNumber": "****4821"
+    },
+    "amount": {
+      "amount": "150000.00",
+      "currency": "COP"
+    },
+    "capturedAmount": {
+      "amount": "0.00",
+      "currency": "COP"
+    },
+    "refundedAmount": {
+      "amount": "0.00",
+      "currency": "COP"
+    },
+    "creditor": {
+      "name": "Tienda Ejemplo S.A.S.",
+      "identification": {
+        "type": "NIT",
+        "number": "900123456-7"
+      },
+      "merchantCategoryCode": "5732"
+    },
+    "remittanceInformation": "TIENDA EJEMPLO ORDEN 48213",
+    "metadata": {
+      "orderId": "48213"
+    },
+    "createdAt": "2026-09-10T14:32:06Z",
+    "updatedAt": "2026-09-10T14:32:09Z",
+    "links": {
+      "self": "/payments/pay_5Pz1Rk8Md3Qy6Hc9",
+      "consent": "/payment-consents/cns_7Kd9mQ2pLx4Rt8Vw"
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "summary": "El core no está disponible; la orden no se envió",
+  "value": {
+    "type": "https://developer.entidad-financiera.example/errors/core-no-disponible",
+    "title": "El core transaccional no está disponible",
+    "status": 503,
+    "detail": "El circuito hacia el core está abierto y la orden NO se envió. Es seguro reintentar tras el tiempo indicado en Retry-After con la misma Idempotency-Key.",
+    "instance": "/payments",
+    "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
+  }
+}

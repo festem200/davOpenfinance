@@ -1,0 +1,319 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WSDL ILUSTRATIVO del servicio de pagos del BUS corporativo.
+
+  No es el contrato real (no existe todavía — el reto parte de cero). Es la forma que el
+  equipo de integración esperaría recibir del equipo del BUS, y sirve para dos cosas:
+    1. Hacer explícito qué operaciones necesita la fachada REST del core. En especial
+       ConsultarTransaccion, sin la cual un timeout es indistinguible de un débito efectuado.
+    2. Anclar la tabla de mapeo campo a campo de mapeo-rest-soap.md.
+
+  Convenciones asumidas (a confirmar con el equipo del BUS — ver docs/respuestas.md §4):
+    - WS-Security con X.509 (firma del Body) + mTLS en el canal.
+    - Toda operación que mueve dinero recibe idTransaccion (idempotencia del lado del core).
+    - Los montos viajan como decimal con dos posiciones, nunca como flotante.
+    - Un SOAP Fault de negocio (codigoRetorno != 00) es distinto de un Fault técnico.
+-->
+<wsdl:definitions
+    xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap12/"
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+    xmlns:tns="urn:entidad:bus:pagos:v1"
+    targetNamespace="urn:entidad:bus:pagos:v1"
+    name="ServicioPagos">
+
+  <wsdl:types>
+    <xsd:schema targetNamespace="urn:entidad:bus:pagos:v1" elementFormDefault="qualified">
+
+      <!-- ===== Tipos comunes ===== -->
+      <xsd:simpleType name="Monto">
+        <xsd:restriction base="xsd:decimal">
+          <xsd:fractionDigits value="2"/>
+          <xsd:totalDigits value="17"/>
+          <xsd:minInclusive value="0"/>
+        </xsd:restriction>
+      </xsd:simpleType>
+
+      <xsd:simpleType name="TipoProducto">
+        <xsd:restriction base="xsd:string">
+          <xsd:enumeration value="CAH"/>  <!-- cuenta de ahorros -->
+          <xsd:enumeration value="TCR"/>  <!-- tarjeta de crédito -->
+        </xsd:restriction>
+      </xsd:simpleType>
+
+      <xsd:simpleType name="TipoIdentificacion">
+        <xsd:restriction base="xsd:string">
+          <xsd:enumeration value="NIT"/>
+          <xsd:enumeration value="CC"/>
+          <xsd:enumeration value="CE"/>
+          <xsd:enumeration value="PA"/>
+          <xsd:enumeration value="TI"/>
+        </xsd:restriction>
+      </xsd:simpleType>
+
+      <xsd:complexType name="Identificacion">
+        <xsd:sequence>
+          <xsd:element name="tipo" type="tns:TipoIdentificacion"/>
+          <xsd:element name="numero" type="xsd:string"/>
+        </xsd:sequence>
+      </xsd:complexType>
+
+      <!-- Cabecera de trazabilidad y auditoría, presente en toda petición -->
+      <xsd:complexType name="Cabecera">
+        <xsd:sequence>
+          <xsd:element name="idCorrelacion" type="xsd:string"/>       <!-- traceparent de la fachada -->
+          <xsd:element name="canal" type="xsd:string"/>               <!-- OPENFINANCE -->
+          <xsd:element name="idAliado" type="xsd:string"/>            <!-- client_id -->
+          <xsd:element name="fechaHora" type="xsd:dateTime"/>
+          <xsd:element name="usuario" type="xsd:string"/>             <!-- para el log de 5 años -->
+        </xsd:sequence>
+      </xsd:complexType>
+
+      <!-- Producto del cliente referenciado por token, nunca por número en claro -->
+      <xsd:complexType name="ProductoRef">
+        <xsd:sequence>
+          <xsd:element name="tipoProducto" type="tns:TipoProducto"/>
+          <xsd:element name="tokenProducto" type="xsd:string"/>
+        </xsd:sequence>
+      </xsd:complexType>
+
+      <xsd:complexType name="Respuesta">
+        <xsd:sequence>
+          <xsd:element name="codigoRetorno" type="xsd:string"/>       <!-- 00 = éxito -->
+          <xsd:element name="descripcionRetorno" type="xsd:string"/>
+          <xsd:element name="idTransaccionCore" type="xsd:string" minOccurs="0"/>
+          <xsd:element name="fechaHoraCore" type="xsd:dateTime" minOccurs="0"/>
+        </xsd:sequence>
+      </xsd:complexType>
+
+      <!-- ===== ValidarTitularidad: el producto pertenece al cliente que consintió ===== -->
+      <xsd:element name="ValidarTitularidadRequest">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="cabecera" type="tns:Cabecera"/>
+            <xsd:element name="identificacionCliente" type="tns:Identificacion"/>
+            <xsd:element name="producto" type="tns:ProductoRef"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+      <xsd:element name="ValidarTitularidadResponse">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="respuesta" type="tns:Respuesta"/>
+            <xsd:element name="esTitular" type="xsd:boolean"/>
+            <xsd:element name="estadoProducto" type="xsd:string"/>   <!-- ACTIVO, BLOQUEADO, CANCELADO -->
+            <xsd:element name="numeroEnmascarado" type="xsd:string"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+
+      <!-- ===== DebitarCuenta: riel cuenta de ahorros, una fase ===== -->
+      <xsd:element name="DebitarCuentaRequest">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="cabecera" type="tns:Cabecera"/>
+            <xsd:element name="idTransaccion" type="xsd:string"/>       <!-- idempotencia: derivado de Idempotency-Key -->
+            <xsd:element name="producto" type="tns:ProductoRef"/>
+            <xsd:element name="monto" type="tns:Monto"/>
+            <xsd:element name="moneda" type="xsd:string" fixed="COP"/>
+            <xsd:element name="beneficiario" type="tns:Identificacion"/>
+            <xsd:element name="cuentaBeneficiario" type="xsd:string"/>   <!-- cuenta recaudadora del aliado -->
+            <xsd:element name="referencia" type="xsd:string"/>           <!-- remittanceInformation, ≤ 140 -->
+            <xsd:element name="idConsentimiento" type="xsd:string"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+      <xsd:element name="DebitarCuentaResponse">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="respuesta" type="tns:Respuesta"/>
+            <xsd:element name="estadoTransaccion" type="xsd:string"/>  <!-- APLICADA, RECHAZADA, EN_PROCESO -->
+            <xsd:element name="gmfAplicado" type="tns:Monto" minOccurs="0"/> <!-- 4x1000, si aplica -->
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+
+      <!-- ===== AutorizarTarjeta / CapturarAutorizacion / AnularAutorizacion: riel tarjeta, dos fases ===== -->
+      <xsd:element name="AutorizarTarjetaRequest">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="cabecera" type="tns:Cabecera"/>
+            <xsd:element name="idTransaccion" type="xsd:string"/>
+            <xsd:element name="producto" type="tns:ProductoRef"/>
+            <xsd:element name="monto" type="tns:Monto"/>
+            <xsd:element name="moneda" type="xsd:string" fixed="COP"/>
+            <xsd:element name="numeroCuotas" type="xsd:int"/>
+            <xsd:element name="codigoComercio" type="xsd:string"/>
+            <xsd:element name="mcc" type="xsd:string"/>
+            <xsd:element name="referencia" type="xsd:string"/>
+            <xsd:element name="idConsentimiento" type="xsd:string"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+      <xsd:element name="AutorizarTarjetaResponse">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="respuesta" type="tns:Respuesta"/>
+            <xsd:element name="codigoAutorizacion" type="xsd:string" minOccurs="0"/>
+            <xsd:element name="fechaVencimientoAutorizacion" type="xsd:dateTime" minOccurs="0"/>
+            <xsd:element name="franquicia" type="xsd:string" minOccurs="0"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+
+      <xsd:element name="CapturarAutorizacionRequest">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="cabecera" type="tns:Cabecera"/>
+            <xsd:element name="idTransaccion" type="xsd:string"/>
+            <xsd:element name="idTransaccionCoreAutorizacion" type="xsd:string"/>
+            <xsd:element name="monto" type="tns:Monto"/>
+            <xsd:element name="referencia" type="xsd:string" minOccurs="0"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+      <xsd:element name="CapturarAutorizacionResponse">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="respuesta" type="tns:Respuesta"/>
+            <xsd:element name="montoCapturadoAcumulado" type="tns:Monto"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+
+      <xsd:element name="AnularAutorizacionRequest">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="cabecera" type="tns:Cabecera"/>
+            <xsd:element name="idTransaccion" type="xsd:string"/>
+            <xsd:element name="idTransaccionCoreAutorizacion" type="xsd:string"/>
+            <xsd:element name="motivo" type="xsd:string"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+      <xsd:element name="AnularAutorizacionResponse">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="respuesta" type="tns:Respuesta"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+
+      <!-- ===== ReversarTransaccion: devoluciones (ambos rieles) ===== -->
+      <xsd:element name="ReversarTransaccionRequest">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="cabecera" type="tns:Cabecera"/>
+            <xsd:element name="idTransaccion" type="xsd:string"/>
+            <xsd:element name="idTransaccionCoreOriginal" type="xsd:string"/>
+            <xsd:element name="monto" type="tns:Monto"/>              <!-- parcial o total -->
+            <xsd:element name="motivo" type="xsd:string"/>
+            <xsd:element name="referencia" type="xsd:string" minOccurs="0"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+      <xsd:element name="ReversarTransaccionResponse">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="respuesta" type="tns:Respuesta"/>
+            <xsd:element name="estadoReverso" type="xsd:string"/>     <!-- APLICADO, EN_PROCESO, RECHAZADO -->
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+
+      <!-- ===== ConsultarTransaccion: LA operación que resuelve el timeout ===== -->
+      <xsd:element name="ConsultarTransaccionRequest">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="cabecera" type="tns:Cabecera"/>
+            <!-- Se consulta por el idTransaccion que envió la fachada, no por el del core:
+                 si hubo timeout, la fachada nunca recibió el id del core. -->
+            <xsd:element name="idTransaccion" type="xsd:string"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+      <xsd:element name="ConsultarTransaccionResponse">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="respuesta" type="tns:Respuesta"/>
+            <xsd:element name="existe" type="xsd:boolean"/>
+            <xsd:element name="estadoTransaccion" type="xsd:string" minOccurs="0"/> <!-- APLICADA, RECHAZADA, EN_PROCESO, REVERSADA -->
+            <xsd:element name="monto" type="tns:Monto" minOccurs="0"/>
+            <xsd:element name="fechaHoraAplicacion" type="xsd:dateTime" minOccurs="0"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+
+      <!-- ===== Fault de negocio ===== -->
+      <xsd:element name="FallaNegocio">
+        <xsd:complexType>
+          <xsd:sequence>
+            <xsd:element name="codigoRetorno" type="xsd:string"/>
+            <xsd:element name="descripcionRetorno" type="xsd:string"/>
+            <xsd:element name="idCorrelacion" type="xsd:string"/>
+          </xsd:sequence>
+        </xsd:complexType>
+      </xsd:element>
+    </xsd:schema>
+  </wsdl:types>
+
+  <!-- ===== Mensajes ===== -->
+  <wsdl:message name="ValidarTitularidadIn"><wsdl:part name="body" element="tns:ValidarTitularidadRequest"/></wsdl:message>
+  <wsdl:message name="ValidarTitularidadOut"><wsdl:part name="body" element="tns:ValidarTitularidadResponse"/></wsdl:message>
+  <wsdl:message name="DebitarCuentaIn"><wsdl:part name="body" element="tns:DebitarCuentaRequest"/></wsdl:message>
+  <wsdl:message name="DebitarCuentaOut"><wsdl:part name="body" element="tns:DebitarCuentaResponse"/></wsdl:message>
+  <wsdl:message name="AutorizarTarjetaIn"><wsdl:part name="body" element="tns:AutorizarTarjetaRequest"/></wsdl:message>
+  <wsdl:message name="AutorizarTarjetaOut"><wsdl:part name="body" element="tns:AutorizarTarjetaResponse"/></wsdl:message>
+  <wsdl:message name="CapturarAutorizacionIn"><wsdl:part name="body" element="tns:CapturarAutorizacionRequest"/></wsdl:message>
+  <wsdl:message name="CapturarAutorizacionOut"><wsdl:part name="body" element="tns:CapturarAutorizacionResponse"/></wsdl:message>
+  <wsdl:message name="AnularAutorizacionIn"><wsdl:part name="body" element="tns:AnularAutorizacionRequest"/></wsdl:message>
+  <wsdl:message name="AnularAutorizacionOut"><wsdl:part name="body" element="tns:AnularAutorizacionResponse"/></wsdl:message>
+  <wsdl:message name="ReversarTransaccionIn"><wsdl:part name="body" element="tns:ReversarTransaccionRequest"/></wsdl:message>
+  <wsdl:message name="ReversarTransaccionOut"><wsdl:part name="body" element="tns:ReversarTransaccionResponse"/></wsdl:message>
+  <wsdl:message name="ConsultarTransaccionIn"><wsdl:part name="body" element="tns:ConsultarTransaccionRequest"/></wsdl:message>
+  <wsdl:message name="ConsultarTransaccionOut"><wsdl:part name="body" element="tns:ConsultarTransaccionResponse"/></wsdl:message>
+  <wsdl:message name="FallaNegocio"><wsdl:part name="detail" element="tns:FallaNegocio"/></wsdl:message>
+
+  <!-- ===== Port type ===== -->
+  <wsdl:portType name="ServicioPagosPortType">
+    <wsdl:operation name="ValidarTitularidad">
+      <wsdl:input message="tns:ValidarTitularidadIn"/><wsdl:output message="tns:ValidarTitularidadOut"/><wsdl:fault name="FallaNegocio" message="tns:FallaNegocio"/>
+    </wsdl:operation>
+    <wsdl:operation name="DebitarCuenta">
+      <wsdl:input message="tns:DebitarCuentaIn"/><wsdl:output message="tns:DebitarCuentaOut"/><wsdl:fault name="FallaNegocio" message="tns:FallaNegocio"/>
+    </wsdl:operation>
+    <wsdl:operation name="AutorizarTarjeta">
+      <wsdl:input message="tns:AutorizarTarjetaIn"/><wsdl:output message="tns:AutorizarTarjetaOut"/><wsdl:fault name="FallaNegocio" message="tns:FallaNegocio"/>
+    </wsdl:operation>
+    <wsdl:operation name="CapturarAutorizacion">
+      <wsdl:input message="tns:CapturarAutorizacionIn"/><wsdl:output message="tns:CapturarAutorizacionOut"/><wsdl:fault name="FallaNegocio" message="tns:FallaNegocio"/>
+    </wsdl:operation>
+    <wsdl:operation name="AnularAutorizacion">
+      <wsdl:input message="tns:AnularAutorizacionIn"/><wsdl:output message="tns:AnularAutorizacionOut"/><wsdl:fault name="FallaNegocio" message="tns:FallaNegocio"/>
+    </wsdl:operation>
+    <wsdl:operation name="ReversarTransaccion">
+      <wsdl:input message="tns:ReversarTransaccionIn"/><wsdl:output message="tns:ReversarTransaccionOut"/><wsdl:fault name="FallaNegocio" message="tns:FallaNegocio"/>
+    </wsdl:operation>
+    <wsdl:operation name="ConsultarTransaccion">
+      <wsdl:input message="tns:ConsultarTransaccionIn"/><wsdl:output message="tns:ConsultarTransaccionOut"/><wsdl:fault name="FallaNegocio" message="tns:FallaNegocio"/>
+    </wsdl:operation>
+  </wsdl:portType>
+
+  <!-- ===== Binding SOAP 1.2, document/literal ===== -->
+  <wsdl:binding name="ServicioPagosBinding" type="tns:ServicioPagosPortType">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="ValidarTitularidad"><soap:operation soapAction="urn:entidad:bus:pagos:v1:ValidarTitularidad"/><wsdl:input><soap:body use="literal"/></wsdl:input><wsdl:output><soap:body use="literal"/></wsdl:output><wsdl:fault name="FallaNegocio"><soap:fault name="FallaNegocio" use="literal"/></wsdl:fault></wsdl:operation>
+    <wsdl:operation name="DebitarCuenta"><soap:operation soapAction="urn:entidad:bus:pagos:v1:DebitarCuenta"/><wsdl:input><soap:body use="literal"/></wsdl:input><wsdl:output><soap:body use="literal"/></wsdl:output><wsdl:fault name="FallaNegocio"><soap:fault name="FallaNegocio" use="literal"/></wsdl:fault></wsdl:operation>
+    <wsdl:operation name="AutorizarTarjeta"><soap:operation soapAction="urn:entidad:bus:pagos:v1:AutorizarTarjeta"/><wsdl:input><soap:body use="literal"/></wsdl:input><wsdl:output><soap:body use="literal"/></wsdl:output><wsdl:fault name="FallaNegocio"><soap:fault name="FallaNegocio" use="literal"/></wsdl:fault></wsdl:operation>
+    <wsdl:operation name="CapturarAutorizacion"><soap:operation soapAction="urn:entidad:bus:pagos:v1:CapturarAutorizacion"/><wsdl:input><soap:body use="literal"/></wsdl:input><wsdl:output><soap:body use="literal"/></wsdl:output><wsdl:fault name="FallaNegocio"><soap:fault name="FallaNegocio" use="literal"/></wsdl:fault></wsdl:operation>
+    <wsdl:operation name="AnularAutorizacion"><soap:operation soapAction="urn:entidad:bus:pagos:v1:AnularAutorizacion"/><wsdl:input><soap:body use="literal"/></wsdl:input><wsdl:output><soap:body use="literal"/></wsdl:output><wsdl:fault name="FallaNegocio"><soap:fault name="FallaNegocio" use="literal"/></wsdl:fault></wsdl:operation>
+    <wsdl:operation name="ReversarTransaccion"><soap:operation soapAction="urn:entidad:bus:pagos:v1:ReversarTransaccion"/><wsdl:input><soap:body use="literal"/></wsdl:input><wsdl:output><soap:body use="literal"/></wsdl:output><wsdl:fault name="FallaNegocio"><soap:fault name="FallaNegocio" use="literal"/></wsdl:fault></wsdl:operation>
+    <wsdl:operation name="ConsultarTransaccion"><soap:operation soapAction="urn:entidad:bus:pagos:v1:ConsultarTransaccion"/><wsdl:input><soap:body use="literal"/></wsdl:input><wsdl:output><soap:body use="literal"/></wsdl:output><wsdl:fault name="FallaNegocio"><soap:fault name="FallaNegocio" use="literal"/></wsdl:fault></wsdl:operation>
+  </wsdl:binding>
+
+  <wsdl:service name="ServicioPagos">
+    <wsdl:port name="ServicioPagosPort" binding="tns:ServicioPagosBinding">
+      <soap:address location="https://bus.interno.entidad-financiera.example/pagos/v1"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>
