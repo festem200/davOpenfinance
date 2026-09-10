@@ -1,0 +1,13 @@
+{
+  "summary": "Conexión válida en sandbox",
+  "value": {
+    "environment": "sandbox",
+    "clientId": "aliado-demo-001",
+    "certificateThumbprint": "S3XZ0oXk8_2vG1Q9r5wq4bZk8Yl0mN7pQ2sT4uV6wX8",
+    "tokenBoundToCertificate": true,
+    "effectiveScopes": [
+      "connection:test"
+    ],
+    "serverTime": "2026-09-10T14:32:07Z"
+  }
+}

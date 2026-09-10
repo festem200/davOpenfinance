@@ -1,0 +1,11 @@
+{
+  "summary": "El token no corresponde al certificado de esta conexión",
+  "value": {
+    "type": "https://developer.entidad-financiera.example/errors/token-sin-vinculo",
+    "title": "El token no está vinculado a este certificado",
+    "status": 401,
+    "detail": "El claim cnf.x5t#S256 del token no coincide con la huella del certificado presentado en la conexión TLS. Solicita un token nuevo usando el mismo certificado con el que abres la conexión.",
+    "instance": "/connection-test",
+    "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
+  }
+}
