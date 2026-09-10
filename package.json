@@ -1,0 +1,18 @@
+{
+  "name": "davopenfinance",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Diseño de APIs de pago sobre un BUS SOAP para un ecosistema Open Finance colombiano",
+  "scripts": {
+    "lint:api": "redocly lint api/openapi.yaml && spectral lint api/openapi.yaml --ruleset .spectral.yaml --fail-severity=warn",
+    "mock": "prism mock api/openapi.yaml --errors --port 4010",
+    "smoke": "bash scripts/smoke-contrato.sh",
+    "diagrams": "bash scripts/exportar-diagramas.sh",
+    "docs:preview": "redocly preview-docs api/openapi.yaml"
+  },
+  "devDependencies": {
+    "@redocly/cli": "2.52.0",
+    "@stoplight/prism-cli": "5.16.0",
+    "@stoplight/spectral-cli": "6.16.3"
+  }
+}

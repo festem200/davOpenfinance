@@ -1,0 +1,47 @@
+# Ruleset propio del contrato de pagos.
+# Objetivo: que el modelo de permisos viva en el contrato y no en un documento aparte
+# que se desincroniza. Ver docs/respuestas.md §3.
+extends: ["spectral:oas"]
+
+rules:
+  # Toda operación declara `security` de forma explícita — incluso las públicas, que lo
+  # hacen con `security: []`. Un endpoint sin la propiedad es un olvido, no una decisión.
+  operacion-declara-seguridad:
+    description: Toda operación debe declarar `security` explícitamente (mínimo privilegio).
+    message: "{{path}} no declara `security`. Usa `security: []` si la operación es pública a propósito."
+    given: "$.paths[*][get,post,put,patch,delete]"
+    severity: error
+    then:
+      field: security
+      function: truthy
+
+  # Los scopes son un catálogo cerrado: un scope inventado en una operación rompe el lint.
+  scope-en-catalogo:
+    description: Los scopes usados deben pertenecer al catálogo declarado del ecosistema.
+    message: "Scope fuera del catálogo: {{value}}"
+    given: "$.paths[*][get,post,put,patch,delete].security[*].oauth2[*]"
+    severity: error
+    then:
+      function: enumeration
+      functionOptions:
+        values:
+          - "payments:initiate"
+          - "payments:read"
+          - "payments:capture"
+          - "payments:cancel"
+          - "refunds:write"
+          - "refunds:read"
+          - "consents:write"
+          - "consents:read"
+          - "webhooks:manage"
+          - "payment-methods:read"
+          - "connection:test"
+
+  # Toda operación que mueve dinero debe documentar el comportamiento idempotente.
+  operacion-tiene-operationId:
+    description: Cada operación necesita `operationId` — es lo que nombra el método en los SDK generados.
+    given: "$.paths[*][get,post,put,patch,delete]"
+    severity: error
+    then:
+      field: operationId
+      function: truthy
