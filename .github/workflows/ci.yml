@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [integration, laboratory, main]
+  push:
+    branches: [integration]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Contrato · Diagramas · Enlaces
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Lint del contrato (Redocly + ruleset propio de Spectral)
+        run: npm run lint:api
+
+      - name: Recorrer el contrato contra el mock (Prism)
+        run: npm run smoke
+
+      # draw.io necesita Electron + Xvfb para exportar; correrlo en CI cuesta más de lo
+      # que aporta. Aquí solo se verifica que cada fuente tenga su PNG y viceversa —
+      # el export real se hace en local con `npm run diagrams` antes de commitear.
+      - name: Verificar que cada .drawio tiene su .png
+        run: |
+          faltan=0
+          for f in docs/diagrams/*.drawio; do
+            [ -e "$f" ] || continue
+            png="${f%.drawio}.png"
+            if [ ! -f "$png" ]; then echo "✗ Falta el PNG de $f"; faltan=1; fi
+          done
+          for p in docs/diagrams/*.png; do
+            [ -e "$p" ] || continue
+            src="${p%.png}.drawio"
+            if [ ! -f "$src" ]; then echo "✗ PNG huérfano sin fuente: $p"; faltan=1; fi
+          done
+          [ "$faltan" -eq 0 ] && echo "✓ Diagramas pareados"
+          exit "$faltan"
+
+      - name: Verificar enlaces del Markdown
+        uses: lycheeverse/lychee-action@v2
+        with:
+          # node_modules queda en el runner tras `npm ci`; sin la exclusión lychee escanea
+          # miles de README de dependencias. 403/429 se aceptan porque varios portales
+          # oficiales (.gov.co) responden así a clientes automatizados sin que el enlace
+          # esté roto — un 404 sí falla.
+          args: >-
+            --no-progress --max-concurrency 4 --max-retries 2 --timeout 20
+            --accept 200..=206,403,429
+            --exclude-path node_modules
+            './**/*.md'
+          fail: true
+          failIfEmpty: false

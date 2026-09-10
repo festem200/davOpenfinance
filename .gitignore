@@ -1,0 +1,8 @@
+node_modules/
+.tmp/
+*.log
+.DS_Store
+
+# El enunciado del reto es material del evaluador — no se publica
+*.docx
+*.docx.md

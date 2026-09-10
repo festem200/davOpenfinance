@@ -1,0 +1,165 @@
+openapi: 3.1.0
+
+info:
+  title: API de Pagos — Open Finance
+  version: 1.0.0
+  summary: Cobros y pagos con Cuenta de Ahorros y Tarjeta de Crédito para aliados y Fintechs.
+  description: |
+    Contrato de las APIs de pago que una entidad financiera expone a sus aliados
+    comerciales y Fintechs para realizar cobros contra los productos de sus clientes.
+
+    El contrato tiene **dos planos**:
+
+    - **Plano de negocio** — consentimientos, pagos, capturas, devoluciones y eventos.
+    - **Plano de confianza** — los endpoints que validan que las dos entidades son
+      quienes dicen ser (FAPI 2.0, mTLS, prueba de conexión).
+
+    Todos los errores se devuelven como **RFC 9457 Problem Details**
+    (`application/problem+json`).
+  contact:
+    name: Portal de desarrolladores
+    url: https://developer.entidad-financiera.example/open-finance
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: https://sandbox.api.entidad-financiera.example/open-finance/payments/v1
+    description: Sandbox — datos sintéticos, sin efectos reales sobre dinero
+  - url: https://api.entidad-financiera.example/open-finance/payments/v1
+    description: Producción
+
+tags:
+  - name: Confianza
+    description: |
+      Endpoints que sostienen la relación entre las dos entidades: descubrimiento,
+      llaves públicas y verificación de la conexión antes de mover dinero.
+
+paths:
+  /connection-test:
+    get:
+      operationId: probarConexion
+      tags: [Confianza]
+      summary: Verifica la conexión de punta a punta
+      description: |
+        Eco autenticado. Devuelve lo que la entidad **realmente resolvió** de la petición:
+        la identidad derivada del certificado de transporte, su huella, si el token está
+        vinculado a ese certificado y qué scopes quedaron efectivos.
+
+        Permite al aliado comprobar que mTLS, el token y los permisos funcionan **antes**
+        de emitir su primer cobro, y da soporte al requisito de *validación periódica del
+        intercambio por API*.
+      security:
+        - oauth2: ["connection:test"]
+      responses:
+        "200":
+          description: Conexión válida
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionTestResult"
+              examples:
+                sandbox:
+                  $ref: "./examples/connection-test-ok.json"
+        "401":
+          $ref: "#/components/responses/NoAutenticado"
+
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      description: |
+        OAuth 2.0 bajo el perfil **FAPI 2.0 Security Profile**: PAR obligatorio,
+        PKCE S256, tokens vinculados al remitente (mTLS, RFC 8705) y autenticación de
+        cliente con `private_key_jwt` (PS256 o superior) o mTLS.
+      flows:
+        clientCredentials:
+          tokenUrl: https://auth.entidad-financiera.example/token
+          scopes:
+            "connection:test": Verificar la conexión sin mover dinero
+            "payment-methods:read": Consultar instrumentos habilitados y sus límites
+            "webhooks:manage": Administrar suscripciones a eventos
+        authorizationCode:
+          authorizationUrl: https://auth.entidad-financiera.example/authorize
+          tokenUrl: https://auth.entidad-financiera.example/token
+          scopes:
+            "payments:initiate": Iniciar un cobro contra un consentimiento autorizado
+            "payments:read": Consultar el estado de un pago
+            "payments:capture": Capturar una autorización de tarjeta de crédito
+            "payments:cancel": Anular una autorización no capturada
+            "refunds:write": Emitir devoluciones
+            "refunds:read": Consultar devoluciones
+            "consents:write": Crear y revocar consentimientos de pago
+            "consents:read": Consultar consentimientos
+
+  schemas:
+    ConnectionTestResult:
+      type: object
+      additionalProperties: false
+      required: [environment, clientId, certificateThumbprint, tokenBoundToCertificate, effectiveScopes, serverTime]
+      properties:
+        environment:
+          type: string
+          enum: [sandbox, production]
+          description: Ambiente que atendió la petición. Evita el error clásico de creer que se está en sandbox.
+        clientId:
+          type: string
+          description: Identidad del aliado resuelta a partir del certificado presentado.
+          examples: ["aliado-demo-001"]
+        certificateThumbprint:
+          type: string
+          description: Huella SHA-256 del certificado de transporte, en base64url (`x5t#S256`).
+          examples: ["S3XZ0oXk8_2vG1Q9r5wq4bZk8Yl0mN7pQ2sT4uV6wX8"]
+        tokenBoundToCertificate:
+          type: boolean
+          description: |
+            `true` si el `cnf.x5t#S256` del token coincide con la huella del certificado
+            de esta conexión (RFC 8705). Si es `false`, el token no es de este canal.
+        effectiveScopes:
+          type: array
+          items: { type: string }
+          description: Scopes que quedaron efectivos tras la validación.
+          examples: [["connection:test"]]
+        serverTime:
+          type: string
+          format: date-time
+          description: Hora del servidor, para detectar desfases de reloj antes de firmar.
+
+    ProblemDetail:
+      type: object
+      description: Error en formato RFC 9457.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI del catálogo público de errores.
+          examples: ["https://developer.entidad-financiera.example/errors/no-autenticado"]
+        title:
+          type: string
+          examples: ["No autenticado"]
+        status:
+          type: integer
+          examples: [401]
+        detail:
+          type: string
+          description: Explicación accionable, siempre libre de datos sensibles.
+        instance:
+          type: string
+          description: Referencia URI de la ocurrencia concreta del problema (RFC 9457).
+        traceId:
+          type: string
+          description: Identificador de traza para soporte (W3C Trace Context).
+          examples: ["4bf92f3577b34da6a3ce929d0e0e4736"]
+
+  responses:
+    NoAutenticado:
+      description: Falta el token, está vencido o no está vinculado al certificado presentado.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetail"
+          examples:
+            tokenSinVinculo:
+              $ref: "./examples/error-token-sin-vinculo.json"
+
