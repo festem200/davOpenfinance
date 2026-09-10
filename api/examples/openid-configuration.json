@@ -1,0 +1,51 @@
+{
+  "summary": "Metadatos del servidor de autorización (sandbox)",
+  "value": {
+    "issuer": "https://auth.entidad-financiera.example",
+    "pushed_authorization_request_endpoint": "https://auth.entidad-financiera.example/par",
+    "require_pushed_authorization_requests": true,
+    "authorization_endpoint": "https://auth.entidad-financiera.example/authorize",
+    "token_endpoint": "https://auth.entidad-financiera.example/token",
+    "jwks_uri": "https://auth.entidad-financiera.example/jwks",
+    "registration_endpoint": "https://auth.entidad-financiera.example/register",
+    "backchannel_authentication_endpoint": "https://auth.entidad-financiera.example/bc-authorize",
+    "introspection_endpoint": "https://auth.entidad-financiera.example/introspect",
+    "revocation_endpoint": "https://auth.entidad-financiera.example/revoke",
+    "token_endpoint_auth_methods_supported": [
+      "private_key_jwt",
+      "tls_client_auth"
+    ],
+    "token_endpoint_auth_signing_alg_values_supported": [
+      "PS256",
+      "PS384",
+      "ES256"
+    ],
+    "code_challenge_methods_supported": [
+      "S256"
+    ],
+    "tls_client_certificate_bound_access_tokens": true,
+    "authorization_details_types_supported": [
+      "payment_consent"
+    ],
+    "scopes_supported": [
+      "connection:test",
+      "payment-methods:read",
+      "webhooks:manage",
+      "consents:write",
+      "consents:read",
+      "payments:initiate",
+      "payments:read",
+      "payments:capture",
+      "payments:cancel",
+      "refunds:write",
+      "refunds:read"
+    ],
+    "grant_types_supported": [
+      "client_credentials",
+      "authorization_code",
+      "urn:openid:params:grant-type:ciba",
+      "refresh_token"
+    ],
+    "authorization_response_iss_parameter_supported": true
+  }
+}

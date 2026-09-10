@@ -1,0 +1,61 @@
+{
+  "summary": "Instrumentos habilitados para el aliado (sandbox)",
+  "value": {
+    "items": [
+      {
+        "instrumentType": "SAVINGS_ACCOUNT",
+        "enabled": true,
+        "currency": "COP",
+        "limits": {
+          "minAmount": {
+            "amount": "1000.00",
+            "currency": "COP"
+          },
+          "maxAmountPerPayment": {
+            "amount": "20000000.00",
+            "currency": "COP"
+          },
+          "maxAmountPerDay": {
+            "amount": "50000000.00",
+            "currency": "COP"
+          }
+        },
+        "features": {
+          "recurring": true,
+          "partialCapture": false,
+          "partialRefund": true,
+          "installments": false,
+          "decoupledAuthorization": true
+        },
+        "settlementWindow": "Inmediata"
+      },
+      {
+        "instrumentType": "CREDIT_CARD",
+        "enabled": true,
+        "currency": "COP",
+        "limits": {
+          "minAmount": {
+            "amount": "5000.00",
+            "currency": "COP"
+          },
+          "maxAmountPerPayment": {
+            "amount": "30000000.00",
+            "currency": "COP"
+          },
+          "maxAmountPerDay": {
+            "amount": "60000000.00",
+            "currency": "COP"
+          }
+        },
+        "features": {
+          "recurring": true,
+          "partialCapture": true,
+          "partialRefund": true,
+          "installments": true,
+          "decoupledAuthorization": true
+        },
+        "settlementWindow": "Captura inmediata; liquidación al comercio según ciclo de adquirencia"
+      }
+    ]
+  }
+}

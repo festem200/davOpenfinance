@@ -1,0 +1,23 @@
+{
+  "summary": "Devolución aceptada, en proceso",
+  "value": {
+    "refundId": "rfd_6Ym3Kd8Qp2Wx5Zn1",
+    "paymentId": "pay_3Hn8Zc1Qw7Lp5Ky2",
+    "amount": {
+      "amount": "50000.00",
+      "currency": "COP"
+    },
+    "status": "PROCESSED",
+    "reason": "PRODUCT_NOT_DELIVERED",
+    "settlement": {
+      "rail": "ON_US",
+      "reference": "CORE-2026091209440212",
+      "settledAt": "2026-09-12T09:44:02Z"
+    },
+    "createdAt": "2026-09-12T09:44:01Z",
+    "links": {
+      "self": "/payments/pay_3Hn8Zc1Qw7Lp5Ky2/refunds/rfd_6Ym3Kd8Qp2Wx5Zn1",
+      "payment": "/payments/pay_3Hn8Zc1Qw7Lp5Ky2"
+    }
+  }
+}

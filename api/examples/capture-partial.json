@@ -1,0 +1,13 @@
+{
+  "summary": "Captura procesada",
+  "value": {
+    "captureId": "cap_2Lq7Vx4Nw9Tb1Ks8",
+    "paymentId": "pay_8Wq2Nv5Tb9Xk4Jm7",
+    "amount": {
+      "amount": "500000.00",
+      "currency": "COP"
+    },
+    "status": "PROCESSED",
+    "createdAt": "2026-09-11T09:15:22Z"
+  }
+}

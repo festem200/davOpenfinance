@@ -1,0 +1,14 @@
+{
+  "summary": "Cliente registrado con los scopes aprobados en el alta",
+  "value": {
+    "client_id": "aliado-demo-001",
+    "client_id_issued_at": 1757548327,
+    "redirect_uris": [
+      "https://aliado.example/callback"
+    ],
+    "jwks_uri": "https://aliado.example/.well-known/jwks.json",
+    "token_endpoint_auth_method": "private_key_jwt",
+    "scope": "connection:test payment-methods:read webhooks:manage consents:write consents:read payments:initiate payments:read payments:capture payments:cancel refunds:write refunds:read",
+    "registration_client_uri": "https://auth.entidad-financiera.example/register/aliado-demo-001"
+  }
+}

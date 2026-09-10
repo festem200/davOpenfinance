@@ -1,0 +1,11 @@
+{
+  "summary": "Misma Idempotency-Key con un cuerpo distinto",
+  "value": {
+    "type": "https://developer.entidad-financiera.example/errors/idempotency-key-reutilizada",
+    "title": "Idempotency-Key reutilizada con otro cuerpo",
+    "status": 422,
+    "detail": "La clave 0f8fad5b-d9cb-469f-a165-70867728950e ya se usó con un cuerpo diferente en las últimas 24 h. Si es una operación nueva, genera una clave nueva; si es un reintento, envía el cuerpo original.",
+    "instance": "/payments",
+    "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
+  }
+}

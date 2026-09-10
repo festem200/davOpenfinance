@@ -1,0 +1,25 @@
+{
+  "summary": "Token vinculado al certificado, atado al consentimiento",
+  "value": {
+    "access_token": "eyJhbGciOiJQUzI1NiIsImtpZCI6ImVudGlkYWQtMjAyNi0wOSJ9.eyJpc3MiOiJodHRwczovL2F1dGguZW50aWRhZC1maW5hbmNpZXJhLmV4YW1wbGUiLCJzdWIiOiJhbGlhZG8tZGVtby0wMDEiLCJjbmYiOnsieDV0I1MyNTYiOiJTM1haMG9YazhfMnZHMVE5cjV3cTRiWms4WWwwbU43cFEyc1Q0dVY2d1g4In0sInNjb3BlIjoiY29uc2VudHM6cmVhZCBwYXltZW50czppbml0aWF0ZSBwYXltZW50czpyZWFkIiwiZXhwIjoxNzU3NTQ4OTI3fQ.firma-de-ejemplo",
+    "token_type": "Bearer",
+    "expires_in": 600,
+    "scope": "consents:read payments:initiate payments:read",
+    "authorization_details": [
+      {
+        "type": "payment_consent",
+        "consentId": "cns_7Kd9mQ2pLx4Rt8Vw",
+        "actions": [
+          "initiate",
+          "read"
+        ],
+        "instrumentType": "SAVINGS_ACCOUNT",
+        "amount": {
+          "amount": "150000.00",
+          "currency": "COP"
+        },
+        "creditorName": "Tienda Ejemplo S.A.S."
+      }
+    ]
+  }
+}

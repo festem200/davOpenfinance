@@ -1,0 +1,49 @@
+{
+  "summary": "Débito ejecutado y liquidado de inmediato",
+  "value": {
+    "paymentId": "pay_3Hn8Zc1Qw7Lp5Ky2",
+    "consentId": "cns_7Kd9mQ2pLx4Rt8Vw",
+    "status": "SETTLED",
+    "instrument": {
+      "type": "SAVINGS_ACCOUNT",
+      "productReference": "prd_9Qz2Lm7Xw4Kd8Vn1",
+      "maskedNumber": "****4821"
+    },
+    "amount": {
+      "amount": "150000.00",
+      "currency": "COP"
+    },
+    "capturedAmount": {
+      "amount": "150000.00",
+      "currency": "COP"
+    },
+    "refundedAmount": {
+      "amount": "0.00",
+      "currency": "COP"
+    },
+    "creditor": {
+      "name": "Tienda Ejemplo S.A.S.",
+      "identification": {
+        "type": "NIT",
+        "number": "900123456-7"
+      },
+      "merchantCategoryCode": "5732"
+    },
+    "remittanceInformation": "TIENDA EJEMPLO ORDEN 48213",
+    "settlement": {
+      "rail": "ON_US",
+      "reference": "CORE-2026091014320745",
+      "settledAt": "2026-09-10T14:32:07Z"
+    },
+    "metadata": {
+      "orderId": "48213"
+    },
+    "createdAt": "2026-09-10T14:32:06Z",
+    "updatedAt": "2026-09-10T14:32:07Z",
+    "links": {
+      "self": "/payments/pay_3Hn8Zc1Qw7Lp5Ky2",
+      "consent": "/payment-consents/cns_7Kd9mQ2pLx4Rt8Vw",
+      "refunds": "/payments/pay_3Hn8Zc1Qw7Lp5Ky2/refunds"
+    }
+  }
+}
