@@ -240,14 +240,14 @@ Client Credentials como si sirviera para acceder a datos del titular. Quien impl
 lista literal del numeral 3.2.3 **no cumple FAPI 2.0**, pese a que la norma lo exige. La
 decisión aquí: **FAPI 2.0 puro** (PAR obligatorio, PKCE S256, tokens vinculados, `iss` en la
 respuesta, `code` ≤ 60 s) **más** los requisitos literales colombianos (JWT PS256+,
-`private_key_jwt`, las dos suites, mTLS Ley 527). Cumple ambas lecturas.
+`private_key_jwt` como único método de autenticación de cliente, las dos suites, mTLS Ley 527). Cumple ambas lecturas.
 
 | Requisito FAPI 2.0 | Decisión |
 |---|---|
 | Tokens *sender-constrained* | **mTLS (RFC 8705)** — el transporte mTLS ya es obligatorio en Colombia y es lo que usan Brasil, UK y Australia. DPoP (RFC 9449) como opción secundaria |
 | PAR (RFC 9126) | Obligatorio; `/authorize` sin `request_uri` se rechaza |
 | PKCE | S256 incluso para clientes confidenciales |
-| Autenticación de cliente | `private_key_jwt` (PS256+) o mTLS; `client_secret_*` no existe |
+| Autenticación de cliente | Solo `private_key_jwt` (PS256+), el método que nombra la CE 004/2024. FAPI 2.0 admitiría también mTLS como autenticación, pero la circular es literal y no cuesta nada cumplirla: mTLS queda como canal y ancla del token. `client_secret_*` no existe |
 | Servidor de autorización | Solo clientes confidenciales; ROPC rechazado; `code` ≤ 60 s; `iss` (RFC 9207); tolerancia de reloj 10 s |
 | Servidor de recursos | Token solo en encabezado; verifica firma, vigencia, **revocación** y **vínculo con el certificado** en cada llamada |
 | Producto | AS comercial o Keycloak **con certificación FAPI 2.0 vigente**. No se construye un AS propio |
@@ -301,6 +301,10 @@ Decisiones de diseño:
    "tarjeta de crédito" y recibe una referencia opaca. Nunca lista productos del cliente.
 
 ### 3.4 Cómo se valida la conexión entre las dos entidades
+
+![Secuencia del plano de confianza](./diagrams/08-secuencia-plano-de-confianza.png)
+
+El diagrama recorre los cuatro momentos: **A** alta (una vez), **B** token sin titular, **C** prueba de conexión, **D** cada llamada de negocio. En detalle:
 
 **Al alta (una sola vez):**
 
@@ -409,7 +413,7 @@ la forma esperada de las respuestas; el mapeo campo a campo está en
 |---|---|
 | **Mapeo REST↔SOAP** | Cadena decimal → `xsd:decimal` exacto (150000.00, 0.01, 999999999999999.99); tildes y `ñ` en referencias; campos opcionales ausentes; truncado a 140/40; `SAVINGS_ACCOUNT→CAH`; derivación estable de `idTransaccion` desde `Idempotency-Key` |
 | **Máquina de estados** | Cada transición válida y **cada inválida** → `409` (capturar `CANCELLED`, anular con capturas, devolver `AUTHORIZED` sin capturar, capturar `SAVINGS_ACCOUNT`) |
-| **Idempotencia** | Misma clave + mismo cuerpo → misma respuesta y **una sola** llamada al BUS; misma clave + cuerpo distinto → `422`; sin clave → `400`; clave vencida (24 h) → nueva ejecución |
+| **Idempotencia** | Misma clave + mismo cuerpo → misma respuesta y **una sola** llamada al BUS; misma clave + cuerpo distinto → `422`; sin clave → `400`; clave vencida (24 h) → nueva ejecución; **misma clave en dos aliados → dos ejecuciones independientes** (nunca se sirve la respuesta de otro) |
 | **Aritmética** | Captura parcial ≤ autorizado y Σ capturas ≤ autorizado; Σ devoluciones ≤ capturado; **property-based**: montos aleatorios nunca violan esos invariantes ni pierden centavos |
 | **Fallas del core** | Timeout → `201 PENDING` + programación de consulta; Fault de negocio conocido → `REJECTED` con código público; Fault desconocido → `REJECTED` + alerta; respuesta malformada → `PENDING`; BUS caído antes de enviar → `503`; **jamás** reintento automático de una orden enviada |
 | **Consentimiento** | `SINGLE` consumido no admite segundo pago; `RECURRING` respeta topes por pago y por periodo y `validUntil`; `EXPIRED`/`REVOKED` → `403`; sin `purpose` → `422` |

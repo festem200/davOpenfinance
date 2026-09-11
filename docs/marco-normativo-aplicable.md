@@ -127,7 +127,7 @@ La CE 004/2024 — y el proyecto de 2026, idéntico en este punto — exige "cum
 |---|---|---|
 | **PAR** (RFC 9126) | No lo menciona | **Obligatorio** |
 | Tokens **sender-constrained** (mTLS RFC 8705 o DPoP RFC 9449) | No los menciona | **Obligatorio** — es el requisito central |
-| Autenticación de cliente | Solo `private_key_jwt` | `private_key_jwt` **o** mTLS |
+| Autenticación de cliente | Solo `private_key_jwt` | `private_key_jwt` **o** mTLS — el diseño adopta solo `private_key_jwt`, en cumplimiento literal |
 | Client Credentials | Listado entre los "mecanismos seguros" | No es un flujo para acceder a datos ni dinero del titular |
 | Suites TLS | Dos suites de **TLS 1.2**, sin ECDSA | No restringe; la práctica actual es TLS 1.3 |
 
