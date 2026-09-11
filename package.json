@@ -8,7 +8,8 @@
     "mock": "prism mock api/openapi.yaml --errors --port 4010",
     "smoke": "bash scripts/smoke-contrato.sh",
     "diagrams": "bash scripts/exportar-diagramas.sh",
-    "docs:preview": "redocly preview-docs api/openapi.yaml"
+    "docs:preview": "redocly preview-docs api/openapi.yaml",
+    "bundle": "redocly bundle api/openapi.yaml -o api/openapi.json"
   },
   "devDependencies": {
     "@redocly/cli": "2.52.0",

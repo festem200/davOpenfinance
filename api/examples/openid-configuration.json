@@ -12,8 +12,7 @@
     "introspection_endpoint": "https://auth.entidad-financiera.example/introspect",
     "revocation_endpoint": "https://auth.entidad-financiera.example/revoke",
     "token_endpoint_auth_methods_supported": [
-      "private_key_jwt",
-      "tls_client_auth"
+      "private_key_jwt"
     ],
     "token_endpoint_auth_signing_alg_values_supported": [
       "PS256",

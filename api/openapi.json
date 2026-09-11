@@ -1,0 +1,4614 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "API de Pagos — Open Finance",
+    "version": "1.0.0",
+    "summary": "Cobros con Cuenta de Ahorros y Tarjeta de Crédito para aliados comerciales y Fintechs.",
+    "description": "Contrato de las APIs de pago que una entidad financiera expone a sus aliados\ncomerciales y Fintechs para realizar cobros contra los productos de sus clientes.\nEl *backend* transaccional es un BUS corporativo SOAP; esta fachada REST es la única\nsuperficie que un aliado ve — y la única permitida por la SFC, que prohíbe SOAP en\nlas APIs del sistema de finanzas abiertas.\n\n## Dos planos\n\n- **Plano de confianza** — descubrimiento, registro del aliado, obtención de tokens bajo\n  **FAPI 2.0** y prueba de conexión. Sostiene la relación entre las dos entidades.\n- **Plano de negocio** — consentimientos, pagos, capturas, anulaciones, devoluciones,\n  métodos de pago y eventos.\n\n## Dos rieles bajo una sola superficie\n\n| Instrumento | Fases | Riel |\n|---|---|---|\n| `SAVINGS_ACCOUNT` | Una: el débito se ejecuta al crear el pago | Débito on-us / pagos inmediatos |\n| `CREDIT_CARD` | Dos: autorización al crear el pago, captura posterior (total o parcial) | Adquirencia y franquicia |\n\nEl recurso `/payments` es el mismo para ambos; cambia el instrumento y qué sub-recursos\naplican. La [máquina de estados](https://github.com/festem200/davOpenfinance/blob/main/docs/diagrams/04-maquina-de-estados-pago.png)\ndocumenta cada transición.\n\n## Convenciones transversales\n\n- **Errores:** siempre **RFC 9457 Problem Details** (`application/problem+json`), con `type`\n  apuntando a un catálogo público y `traceId` para soporte.\n- **Idempotencia:** todo `POST` que mueve dinero exige `Idempotency-Key`. Misma clave +\n  mismo cuerpo → misma respuesta (`Idempotency-Replayed: true`); misma clave + cuerpo\n  distinto → `422`.\n- **Dinero:** cadena decimal + ISO 4217. Nunca números de punto flotante.\n- **Timeout del core:** si la orden ya se envió al BUS y este no responde a tiempo, el\n  pago **existe** con estado `PENDING` y se resuelve por consulta de referencia. Nunca se\n  responde `504` para un pago que pudo haberse ejecutado.\n- **Paginación:** por cursor opaco (`nextCursor`), nunca por offset.\n- **Trazabilidad:** `traceparent` (W3C Trace Context) se propaga hasta el BUS.\n- **Firma de mensajes:** las peticiones que mueven dinero y todos los webhooks van\n  firmados con **HTTP Message Signatures (RFC 9421)** + `Content-Digest` (RFC 9530).\n- **Datos mínimos:** el aliado nunca recibe números de cuenta ni de tarjeta completos —\n  solo una referencia opaca del producto y un enmascarado para mostrar al cliente.\n",
+    "contact": {
+      "name": "Portal de desarrolladores",
+      "url": "https://developer.entidad-financiera.example/open-finance"
+    },
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://sandbox.api.entidad-financiera.example/open-finance/payments/v1",
+      "description": "Sandbox — datos sintéticos, escenarios deterministas, sin efectos sobre dinero real"
+    },
+    {
+      "url": "https://api.entidad-financiera.example/open-finance/payments/v1",
+      "description": "Producción"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Confianza",
+      "description": "Endpoints que sostienen la relación entre las dos entidades: descubrimiento, registro\ndel aliado, emisión de tokens bajo FAPI 2.0 y verificación de la conexión **antes de\nmover dinero**. Los endpoints de autorización viven en el servidor de autorización de\nla entidad (`servers` propio en cada operación).\n"
+    },
+    {
+      "name": "Consentimientos",
+      "description": "Autorización del titular para que el aliado cobre contra uno de sus productos. Tiene\nciclo de vida propio, vigencia y revocación. Un consentimiento `SINGLE` cubre un solo\npago; uno `RECURRING` cubre una serie con tope por pago y por periodo.\n"
+    },
+    {
+      "name": "Pagos",
+      "description": "Iniciación y consulta de cobros. `GET /payments/{paymentId}` es la fuente de verdad para conciliar."
+    },
+    {
+      "name": "Capturas",
+      "description": "Solo tarjeta de crédito. Captura total o parcial de una autorización."
+    },
+    {
+      "name": "Anulaciones",
+      "description": "Solo tarjeta de crédito. Libera una autorización no capturada."
+    },
+    {
+      "name": "Devoluciones",
+      "description": "Devolución total o parcial de un pago capturado o liquidado."
+    },
+    {
+      "name": "Métodos de pago",
+      "description": "Instrumentos habilitados para el aliado y sus límites vigentes."
+    },
+    {
+      "name": "Eventos",
+      "description": "Notificaciones **push** (webhooks firmados) **y** un feed **pull** paginado. El aliado\nque pierda un webhook se recupera leyendo el feed — nunca depende solo de reintentos.\n"
+    }
+  ],
+  "paths": {
+    "/.well-known/openid-configuration": {
+      "servers": [
+        {
+          "url": "https://auth.entidad-financiera.example"
+        }
+      ],
+      "get": {
+        "operationId": "descubrirConfiguracion",
+        "tags": [
+          "Confianza"
+        ],
+        "summary": "Metadatos del servidor de autorización",
+        "description": "OpenID Discovery / RFC 8414. Publica las URL de `/par`, `/token`, `/bc-authorize`,\n`/jwks` y `/register`, los métodos de autenticación de cliente admitidos\n(`private_key_jwt`), los algoritmos (PS256 o superior — HS256 se\nrechaza), los scopes soportados y `require_pushed_authorization_requests: true`.\nEl aliado configura **una sola URL** y descubre el resto.\n",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Metadatos del servidor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfiguracionServidorAutorizacion"
+                },
+                "examples": {
+                  "sandbox": {
+                    "$ref": "#/components/examples/openid-configuration"
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/LimiteExcedido"
+          }
+        }
+      }
+    },
+    "/jwks": {
+      "servers": [
+        {
+          "url": "https://auth.entidad-financiera.example"
+        }
+      ],
+      "get": {
+        "operationId": "obtenerLlavesPublicas",
+        "tags": [
+          "Confianza"
+        ],
+        "summary": "Llaves públicas de la entidad (JWK Set)",
+        "description": "RFC 7517. Con estas llaves el aliado verifica los tokens emitidos, las firmas de los\nwebhooks y las respuestas firmadas. Cada llave lleva `kid`; la rotación publica la\nllave nueva antes de usarla y mantiene la anterior mientras haya tokens vivos.\n",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Conjunto de llaves públicas",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JwkSet"
+                },
+                "examples": {
+                  "sandbox": {
+                    "$ref": "#/components/examples/jwks"
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/LimiteExcedido"
+          }
+        }
+      }
+    },
+    "/register": {
+      "servers": [
+        {
+          "url": "https://auth.entidad-financiera.example"
+        }
+      ],
+      "post": {
+        "operationId": "registrarCliente",
+        "tags": [
+          "Confianza"
+        ],
+        "summary": "Registro dinámico del aliado como cliente OAuth",
+        "description": "RFC 7591. El aliado presenta un **Software Statement** (JWT firmado por el directorio\nde participantes o, mientras la SFC lo pone en marcha, por la propia entidad tras la\ndebida diligencia del alta) con su `jwks_uri`, sus `redirect_uris` y los scopes que\nsolicita. La entidad valida la firma, cruza el certificado de transporte con el\nregistro y devuelve el `client_id`. Sustituye el alta manual por correo.\n\nEl *Software Statement* debe traer la huella (`x5t#S256`) del certificado de transporte\nautorizado en el alta, `exp` corto y `jti` de un solo uso; el servidor **compara esa\nhuella con el certificado de la conexión** antes de emitir el `client_id`. Un SSA\nfiltrado no sirve con otro certificado.\n",
+        "security": [
+          {
+            "mutualTLS": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegistroClienteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Cliente registrado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistroClienteResponse"
+                },
+                "examples": {
+                  "sandbox": {
+                    "$ref": "#/components/examples/register-response"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/SolicitudInvalida"
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          }
+        }
+      }
+    },
+    "/par": {
+      "servers": [
+        {
+          "url": "https://auth.entidad-financiera.example"
+        }
+      ],
+      "post": {
+        "operationId": "enviarSolicitudAutorizacion",
+        "tags": [
+          "Confianza"
+        ],
+        "summary": "Pushed Authorization Request (PAR)",
+        "description": "RFC 9126 — **obligatorio en FAPI 2.0**. El aliado envía por el canal posterior,\nautenticado como cliente con `private_key_jwt`, los parámetros de la\nautorización: `scope`, `authorization_details` (RAR, RFC 9396) con el consentimiento\nexacto, `code_challenge` (PKCE S256) y `redirect_uri`. Recibe un `request_uri` de un\nsolo uso con el que redirige al titular a `/authorize`. Nada sensible viaja por el\nnavegador.\n",
+        "security": [
+          {
+            "mutualTLS": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/ParRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Solicitud aceptada; usar `request_uri` en la redirección",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParResponse"
+                },
+                "examples": {
+                  "sandbox": {
+                    "$ref": "#/components/examples/par-response"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorOAuth"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorOAuth"
+          },
+          "429": {
+            "$ref": "#/components/responses/LimiteExcedido"
+          }
+        }
+      }
+    },
+    "/bc-authorize": {
+      "servers": [
+        {
+          "url": "https://auth.entidad-financiera.example"
+        }
+      ],
+      "post": {
+        "operationId": "iniciarAutorizacionDesacoplada",
+        "tags": [
+          "Confianza"
+        ],
+        "summary": "Autorización desacoplada (CIBA)",
+        "description": "FAPI-CIBA. Para cobros donde el titular **no está frente al navegador del aliado**:\npunto de venta físico, centro de contacto, cobro recurrente. El aliado envía el\nconsentimiento en `authorization_details` y un `login_hint`; la entidad notifica al\ntitular en su propio canal (app), donde autentica y **confirma** el cobro. El aliado\nconsulta `/token` con el `auth_req_id` (modo *poll*) o recibe un *ping*.\n",
+        "security": [
+          {
+            "mutualTLS": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/CibaRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Solicitud entregada al titular",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CibaResponse"
+                },
+                "examples": {
+                  "sandbox": {
+                    "$ref": "#/components/examples/ciba-response"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorOAuth"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorOAuth"
+          },
+          "429": {
+            "$ref": "#/components/responses/LimiteExcedido"
+          }
+        }
+      }
+    },
+    "/token": {
+      "servers": [
+        {
+          "url": "https://auth.entidad-financiera.example"
+        }
+      ],
+      "post": {
+        "operationId": "obtenerToken",
+        "tags": [
+          "Confianza"
+        ],
+        "summary": "Emisión de tokens",
+        "description": "RFC 6749 bajo FAPI 2.0. Grants admitidos:\n\n| Grant | Para qué | Scopes posibles |\n|---|---|---|\n| `client_credentials` | Operaciones **sin titular**: métodos de pago, webhooks, prueba de conexión | `payment-methods:read`, `webhooks:manage`, `connection:test` |\n| `authorization_code` (+ PKCE, desde PAR) | Todo lo que **mueve dinero o toca datos del titular** | `consents:*`, `payments:*`, `refunds:*` |\n| `urn:openid:params:grant-type:ciba` | Igual que el anterior, en flujo desacoplado | Ídem |\n| `refresh_token` | Consentimientos `RECURRING`; **rotación en cada uso** (el anterior se invalida) y vinculado al certificado | Los del consentimiento |\n\nRechazados: `password` y cualquier cliente público. El token es un **JWT firmado con\nPS256 o superior**, **vinculado al certificado** de la conexión mTLS (`cnf.x5t#S256`, RFC 8705; el vínculo no depende del método de autenticación)\ny con vida corta. Contiene los `authorization_details` autorizados: el token queda\natado al monto, beneficiario y producto del consentimiento — no a \"pagos en general\".\n",
+        "security": [
+          {
+            "mutualTLS": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Token emitido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                },
+                "examples": {
+                  "sandbox": {
+                    "$ref": "#/components/examples/token-response"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorOAuth"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorOAuth"
+          },
+          "429": {
+            "$ref": "#/components/responses/LimiteExcedido"
+          }
+        }
+      }
+    },
+    "/connection-test": {
+      "get": {
+        "operationId": "probarConexion",
+        "tags": [
+          "Confianza"
+        ],
+        "summary": "Verifica la conexión de punta a punta",
+        "description": "Eco autenticado. Devuelve lo que la entidad **realmente resolvió** de la petición:\nla identidad derivada del certificado de transporte, su huella, si el token está\nvinculado a ese certificado y qué scopes quedaron efectivos.\n\nPermite al aliado comprobar que mTLS, el token y los permisos funcionan **antes**\nde emitir su primer cobro, y da soporte al requisito de *validación periódica del\nintercambio por API*.\n",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "connection:test"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Conexión válida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionTestResult"
+                },
+                "examples": {
+                  "sandbox": {
+                    "$ref": "#/components/examples/connection-test-ok"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          }
+        }
+      }
+    },
+    "/payment-consents": {
+      "post": {
+        "operationId": "crearConsentimiento",
+        "tags": [
+          "Consentimientos"
+        ],
+        "summary": "Crea un consentimiento de pago",
+        "description": "Primer paso de cualquier cobro. El aliado declara **exactamente** lo que el titular va\na autorizar: instrumento, monto (o tope si es recurrente), beneficiario, finalidad\nespecífica y vigencia — los campos mínimos que exige la norma colombiana para una\nautorización, que prohíbe las autorizaciones generales o abiertas.\n\nLa respuesta trae el `consentId` y cómo continuar: `REDIRECT` (el aliado hace PAR con\neste consentimiento en `authorization_details` y redirige al titular) o `DECOUPLED`\n(CIBA). En ambos casos **la entidad autentica al titular y le muestra el contenido del\nconsentimiento para que autorice o deniegue** — el aliado nunca ve credenciales.\n",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "consents:write"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          },
+          {
+            "$ref": "#/components/parameters/SignatureInput"
+          },
+          {
+            "$ref": "#/components/parameters/Signature"
+          },
+          {
+            "$ref": "#/components/parameters/ContentDigest"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaymentConsentRequest"
+              },
+              "examples": {
+                "ahorrosUnico": {
+                  "$ref": "#/components/examples/consent-request-savings-single"
+                },
+                "tarjetaRecurrente": {
+                  "$ref": "#/components/examples/consent-request-card-recurring"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Consentimiento creado, pendiente de autorización del titular",
+            "headers": {
+              "Location": {
+                "$ref": "#/components/headers/Location"
+              },
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentConsent"
+                },
+                "examples": {
+                  "pendiente": {
+                    "$ref": "#/components/examples/consent-awaiting"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/SolicitudInvalida"
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          },
+          "403": {
+            "$ref": "#/components/responses/Prohibido"
+          },
+          "422": {
+            "$ref": "#/components/responses/NoProcesable"
+          },
+          "429": {
+            "$ref": "#/components/responses/LimiteExcedido"
+          }
+        }
+      }
+    },
+    "/payment-consents/{consentId}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ConsentId"
+        }
+      ],
+      "get": {
+        "operationId": "consultarConsentimiento",
+        "tags": [
+          "Consentimientos"
+        ],
+        "summary": "Consulta un consentimiento",
+        "description": "Estado actual, producto seleccionado por el titular (enmascarado) y vigencia.",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "consents:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Consentimiento",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentConsent"
+                },
+                "examples": {
+                  "autorizado": {
+                    "$ref": "#/components/examples/consent-authorised"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          },
+          "403": {
+            "$ref": "#/components/responses/Prohibido"
+          },
+          "404": {
+            "$ref": "#/components/responses/NoEncontrado"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "revocarConsentimiento",
+        "tags": [
+          "Consentimientos"
+        ],
+        "summary": "Revoca un consentimiento",
+        "description": "Lo deja en `REVOKED`. Los pagos ya ejecutados no se afectan; ningún pago nuevo puede\nusarlo. El titular también puede revocarlo desde su propio canal — el aliado se entera\npor el evento `consent.revoked`.\n",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "consents:write"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revocado"
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          },
+          "403": {
+            "$ref": "#/components/responses/Prohibido"
+          },
+          "404": {
+            "$ref": "#/components/responses/NoEncontrado"
+          }
+        }
+      }
+    },
+    "/payments": {
+      "post": {
+        "operationId": "crearPago",
+        "tags": [
+          "Pagos"
+        ],
+        "summary": "Inicia un cobro contra un consentimiento autorizado",
+        "description": "Ejecuta la orden. El token debe traer en `authorization_details` el mismo\nconsentimiento, y el monto debe coincidir (`SINGLE`) o respetar los topes\n(`RECURRING`); si no, `403`.\n\n- `SAVINGS_ACCOUNT`: el débito se ejecuta ahora. Respuesta `201` con `CAPTURED`\n  (o `SETTLED` si la liquidación es inmediata).\n- `CREDIT_CARD`: se **autoriza** y se retiene cupo. Respuesta `201` con `AUTHORIZED`;\n  luego se captura con `POST /payments/{paymentId}/captures` (o de inmediato si\n  `captureMode: AUTOMATIC`).\n\n**Timeout del core.** Si la orden ya viajó al BUS y este no responde dentro del\npresupuesto de latencia, la respuesta es igualmente `201` con `PENDING`: el recurso\nexiste y su estado final llega por evento o por `GET`. Un `504` aquí sería una\nmentira peligrosa — el débito pudo haberse ejecutado.\n",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "payments:initiate"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          },
+          {
+            "$ref": "#/components/parameters/SignatureInput"
+          },
+          {
+            "$ref": "#/components/parameters/Signature"
+          },
+          {
+            "$ref": "#/components/parameters/ContentDigest"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaymentRequest"
+              },
+              "examples": {
+                "ahorros": {
+                  "$ref": "#/components/examples/payment-request-savings"
+                },
+                "tarjeta": {
+                  "$ref": "#/components/examples/payment-request-card"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Pago creado (ejecutado, autorizado o pendiente de confirmación del core)",
+            "headers": {
+              "Location": {
+                "$ref": "#/components/headers/Location"
+              },
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Payment"
+                },
+                "examples": {
+                  "ahorrosLiquidado": {
+                    "$ref": "#/components/examples/payment-savings-settled"
+                  },
+                  "tarjetaAutorizada": {
+                    "$ref": "#/components/examples/payment-card-authorized"
+                  },
+                  "pendienteDelCore": {
+                    "$ref": "#/components/examples/payment-pending-core-timeout"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/SolicitudInvalida"
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          },
+          "403": {
+            "$ref": "#/components/responses/Prohibido"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflicto"
+          },
+          "422": {
+            "$ref": "#/components/responses/NoProcesable"
+          },
+          "429": {
+            "$ref": "#/components/responses/LimiteExcedido"
+          },
+          "503": {
+            "$ref": "#/components/responses/CoreNoDisponible"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listarPagos",
+        "tags": [
+          "Pagos"
+        ],
+        "summary": "Lista pagos del aliado",
+        "description": "Para conciliación. Paginado por cursor; filtra por estado y ventana de tiempo.",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "payments:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/PaymentStatus"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inicio de la ventana (inclusive), por `createdAt`.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Fin de la ventana (exclusive), por `createdAt`.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Página de pagos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentPage"
+                },
+                "examples": {
+                  "pagina": {
+                    "$ref": "#/components/examples/payments-page"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/SolicitudInvalida"
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          },
+          "403": {
+            "$ref": "#/components/responses/Prohibido"
+          }
+        }
+      }
+    },
+    "/payments/{paymentId}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/PaymentId"
+        }
+      ],
+      "get": {
+        "operationId": "consultarPago",
+        "tags": [
+          "Pagos"
+        ],
+        "summary": "Consulta un pago",
+        "description": "**Fuente de verdad** para conciliar. Idempotente y barato: ante cualquier duda\n(timeout, webhook perdido, respuesta ambigua) el aliado consulta aquí en vez de\nreintentar el `POST`.\n",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "payments:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pago",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Payment"
+                },
+                "examples": {
+                  "liquidado": {
+                    "$ref": "#/components/examples/payment-savings-settled"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          },
+          "403": {
+            "$ref": "#/components/responses/Prohibido"
+          },
+          "404": {
+            "$ref": "#/components/responses/NoEncontrado"
+          }
+        }
+      }
+    },
+    "/payments/{paymentId}/captures": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/PaymentId"
+        }
+      ],
+      "post": {
+        "operationId": "capturarPago",
+        "tags": [
+          "Capturas"
+        ],
+        "summary": "Captura una autorización de tarjeta",
+        "description": "Solo `CREDIT_CARD` en estado `AUTHORIZED`. Sin `amount`, captura el saldo autorizado\nrestante. La suma de capturas nunca supera el monto autorizado (`422`). Sobre un pago\nque no está autorizado, `409`.\n",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "payments:capture"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          },
+          {
+            "$ref": "#/components/parameters/SignatureInput"
+          },
+          {
+            "$ref": "#/components/parameters/Signature"
+          },
+          {
+            "$ref": "#/components/parameters/ContentDigest"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CaptureRequest"
+              },
+              "examples": {
+                "parcial": {
+                  "$ref": "#/components/examples/capture-request-partial"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Captura procesada",
+            "headers": {
+              "Location": {
+                "$ref": "#/components/headers/Location"
+              },
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Capture"
+                },
+                "examples": {
+                  "parcial": {
+                    "$ref": "#/components/examples/capture-partial"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/SolicitudInvalida"
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          },
+          "403": {
+            "$ref": "#/components/responses/Prohibido"
+          },
+          "404": {
+            "$ref": "#/components/responses/NoEncontrado"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflicto"
+          },
+          "422": {
+            "$ref": "#/components/responses/NoProcesable"
+          },
+          "503": {
+            "$ref": "#/components/responses/CoreNoDisponible"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listarCapturas",
+        "tags": [
+          "Capturas"
+        ],
+        "summary": "Lista las capturas de un pago",
+        "description": "Todas las capturas del pago, en orden de creación. La suma de las procesadas es `capturedAmount` del pago.",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "payments:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Capturas del pago",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "items"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Capture"
+                      }
+                    }
+                  }
+                },
+                "examples": {
+                  "capturas": {
+                    "$ref": "#/components/examples/captures-list"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          },
+          "403": {
+            "$ref": "#/components/responses/Prohibido"
+          },
+          "404": {
+            "$ref": "#/components/responses/NoEncontrado"
+          }
+        }
+      }
+    },
+    "/payments/{paymentId}/cancellations": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/PaymentId"
+        }
+      ],
+      "post": {
+        "operationId": "anularAutorizacion",
+        "tags": [
+          "Anulaciones"
+        ],
+        "summary": "Anula una autorización de tarjeta no capturada",
+        "description": "Solo `CREDIT_CARD` en `AUTHORIZED` sin capturas. Libera el cupo retenido y deja el pago\nen `CANCELLED`. Si ya hubo capturas, lo correcto es una **devolución**, no una\nanulación (`409`).\n",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "payments:cancel"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          },
+          {
+            "$ref": "#/components/parameters/SignatureInput"
+          },
+          {
+            "$ref": "#/components/parameters/Signature"
+          },
+          {
+            "$ref": "#/components/parameters/ContentDigest"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancellationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Autorización anulada",
+            "headers": {
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Cancellation"
+                },
+                "examples": {
+                  "anulada": {
+                    "$ref": "#/components/examples/cancellation"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/SolicitudInvalida"
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          },
+          "403": {
+            "$ref": "#/components/responses/Prohibido"
+          },
+          "404": {
+            "$ref": "#/components/responses/NoEncontrado"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflicto"
+          },
+          "503": {
+            "$ref": "#/components/responses/CoreNoDisponible"
+          }
+        }
+      }
+    },
+    "/payments/{paymentId}/refunds": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/PaymentId"
+        }
+      ],
+      "post": {
+        "operationId": "crearDevolucion",
+        "tags": [
+          "Devoluciones"
+        ],
+        "summary": "Devuelve total o parcialmente un pago",
+        "description": "Sobre pagos `CAPTURED`, `SETTLED` o `PARTIALLY_REFUNDED`. Sin `amount`, devuelve todo\nlo no devuelto. La suma de devoluciones nunca supera lo capturado (`422`). El dinero\nvuelve al **mismo producto** del que salió — nunca a un destino elegido por el aliado.\nRequiere el scope `refunds:write`, separado de `payments:initiate` a propósito: el\nsistema que cobra rara vez debe ser el que devuelve.\n",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "refunds:write"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          },
+          {
+            "$ref": "#/components/parameters/SignatureInput"
+          },
+          {
+            "$ref": "#/components/parameters/Signature"
+          },
+          {
+            "$ref": "#/components/parameters/ContentDigest"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefundRequest"
+              },
+              "examples": {
+                "parcial": {
+                  "$ref": "#/components/examples/refund-request"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Devolución aceptada",
+            "headers": {
+              "Location": {
+                "$ref": "#/components/headers/Location"
+              },
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refund"
+                },
+                "examples": {
+                  "aceptada": {
+                    "$ref": "#/components/examples/refund"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/SolicitudInvalida"
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          },
+          "403": {
+            "$ref": "#/components/responses/Prohibido"
+          },
+          "404": {
+            "$ref": "#/components/responses/NoEncontrado"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflicto"
+          },
+          "422": {
+            "$ref": "#/components/responses/NoProcesable"
+          },
+          "503": {
+            "$ref": "#/components/responses/CoreNoDisponible"
+          }
+        }
+      }
+    },
+    "/payments/{paymentId}/refunds/{refundId}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/PaymentId"
+        },
+        {
+          "name": "refundId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^rfd_[A-Za-z0-9]{12,32}$"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "consultarDevolucion",
+        "tags": [
+          "Devoluciones"
+        ],
+        "summary": "Consulta una devolución",
+        "description": "Estado y liquidación de una devolución. Una devolución a tarjeta puede quedar `PENDING` varios días hasta que la franquicia la liquida.",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "refunds:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Devolución",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Refund"
+                },
+                "examples": {
+                  "procesada": {
+                    "$ref": "#/components/examples/refund"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          },
+          "403": {
+            "$ref": "#/components/responses/Prohibido"
+          },
+          "404": {
+            "$ref": "#/components/responses/NoEncontrado"
+          }
+        }
+      }
+    },
+    "/payment-methods": {
+      "get": {
+        "operationId": "listarMetodosDePago",
+        "tags": [
+          "Métodos de pago"
+        ],
+        "summary": "Instrumentos habilitados para el aliado y sus límites",
+        "description": "No toca datos del titular: se consume con `client_credentials`. Los límites son los\n**vigentes** para este aliado (vienen del core, no de configuración del servicio) y\nsirven para validar en el checkout antes de crear un consentimiento.\n",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "payment-methods:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Métodos de pago",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "items"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PaymentMethod"
+                      }
+                    }
+                  }
+                },
+                "examples": {
+                  "sandbox": {
+                    "$ref": "#/components/examples/payment-methods"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          }
+        }
+      }
+    },
+    "/webhooks": {
+      "post": {
+        "operationId": "crearWebhook",
+        "tags": [
+          "Eventos"
+        ],
+        "summary": "Suscribe una URL a eventos",
+        "description": "La URL debe ser `https` y responder `2xx` en menos de 5 s. Las entregas van firmadas\ncon la llave de la entidad (RFC 9421; la pública está en `/jwks`) y llevan\n`Webhook-Id` + `Webhook-Timestamp` para rechazar repeticiones. Sin secretos\ncompartidos: el aliado verifica con la llave pública. Reintentos con retroceso\nexponencial durante 24 h; después, la suscripción pasa a `SUSPENDED` y se emite el\nevento `webhook.suspended` al feed.\n\n**Destinos permitidos (contra SSRF):** el nombre se resuelve al registrar **y en cada\nentrega**; se rechazan rangos privados, *loopback*, *link-local* y metadatos de nube;\nno se siguen redirecciones; las entregas salen por un egreso sin ruta a la red interna;\nde la respuesta solo se lee el código de estado.\n",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "webhooks:manage"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Suscripción creada",
+            "headers": {
+              "Location": {
+                "$ref": "#/components/headers/Location"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Webhook"
+                },
+                "examples": {
+                  "activa": {
+                    "$ref": "#/components/examples/webhook"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/SolicitudInvalida"
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listarWebhooks",
+        "tags": [
+          "Eventos"
+        ],
+        "summary": "Lista las suscripciones del aliado",
+        "description": "Incluye las suscripciones `SUSPENDED` por fallos de entrega, para que el aliado las detecte y las reactive creando una nueva.",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "webhooks:manage"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Suscripciones",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "items"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Webhook"
+                      }
+                    }
+                  }
+                },
+                "examples": {
+                  "suscripciones": {
+                    "$ref": "#/components/examples/webhooks-list"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          }
+        }
+      }
+    },
+    "/webhooks/{webhookId}": {
+      "parameters": [
+        {
+          "name": "webhookId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^whk_[A-Za-z0-9]{12,32}$"
+          }
+        }
+      ],
+      "delete": {
+        "operationId": "eliminarWebhook",
+        "tags": [
+          "Eventos"
+        ],
+        "summary": "Elimina una suscripción",
+        "description": "Deja de entregar eventos a esa URL de inmediato. Los eventos siguen disponibles en el feed `GET /events`.",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "webhooks:manage"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Eliminada"
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          },
+          "404": {
+            "$ref": "#/components/responses/NoEncontrado"
+          }
+        }
+      }
+    },
+    "/events": {
+      "get": {
+        "operationId": "listarEventos",
+        "tags": [
+          "Eventos"
+        ],
+        "summary": "Feed de eventos (pull)",
+        "description": "Todo evento entregado por webhook también está aquí, en orden, durante 30 días. Es el\nmecanismo de **recuperación**: un aliado que estuvo caído lee desde su último cursor\ny queda al día sin pedir reenvíos.\n\nEl feed se **filtra por los scopes del token**: `consent.*` solo con `consents:read`,\n`refund.*` solo con `refunds:read`, `payment.*` con `payments:read`. Un token de\nconciliación no ve más de lo que vería consultando los recursos.\n",
+        "security": [
+          {
+            "mutualTLS": [],
+            "oauth2": [
+              "payments:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "description": "Filtra por tipo de evento.",
+            "schema": {
+              "$ref": "#/components/schemas/EventType"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Página de eventos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventPage"
+                },
+                "examples": {
+                  "sandbox": {
+                    "$ref": "#/components/examples/events-page"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/NoAutenticado"
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {
+    "eventoDePago": {
+      "post": {
+        "operationId": "recibirEvento",
+        "summary": "Entrega de un evento al aliado",
+        "security": [],
+        "description": "Lo que la entidad envía a la URL suscrita. El aliado debe: (1) verificar `Signature`\ncon la llave pública de `/jwks`; (2) rechazar si `Webhook-Timestamp` tiene más de 5\nminutos; (3) ignorar `Webhook-Id` ya procesados; (4) responder `2xx` rápido y procesar\nen segundo plano. Ante cualquier duda, **consultar el recurso** (`GET /payments/{id}`)\n— el evento avisa, el recurso decide.\n",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SignatureInput"
+          },
+          {
+            "$ref": "#/components/parameters/Signature"
+          },
+          {
+            "$ref": "#/components/parameters/ContentDigest"
+          },
+          {
+            "name": "Webhook-Id",
+            "in": "header",
+            "required": true,
+            "description": "Identificador único de la entrega, estable entre reintentos.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Webhook-Timestamp",
+            "in": "header",
+            "required": true,
+            "description": "Instante de emisión (RFC 3339). Rechazar si difiere más de 5 min del reloj local.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Event"
+              }
+            }
+          }
+        },
+        "responses": {
+          "2XX": {
+            "description": "Recibido. Cualquier otro código dispara reintento."
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "mutualTLS": {
+        "type": "mutualTLS",
+        "description": "TLS con autenticación mutua en **toda** conexión. El certificado del aliado debe\nestar vigente, emitido por una entidad de certificación reconocida conforme a la\n**Ley 527 de 1999**, y corresponder al `client_id` registrado. Suites admitidas:\n`TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256` y `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`\n(TLS 1.2, exigidas por la circular) y las de TLS 1.3. TLS 1.0 y 1.1 se rechazan.\n"
+      },
+      "oauth2": {
+        "type": "oauth2",
+        "description": "OAuth 2.0 bajo el perfil **FAPI 2.0 Security Profile**: PAR obligatorio, PKCE S256,\ntokens **vinculados al certificado** del cliente (RFC 8705, claim `cnf.x5t#S256`),\nautenticación de cliente con `private_key_jwt` (PS256 o superior), `code` con\nvida ≤ 60 s, `iss` en la respuesta de autorización (RFC 9207). El token va **solo** en\nel encabezado `Authorization`; nunca en la URL.\n\nLos scopes dicen *qué operación*; el consentimiento en `authorization_details`\n(RFC 9396) dice *cuánto, a quién, desde qué producto y hasta cuándo*. Ambos se\nvalidan en cada llamada, y después el core valida la titularidad del producto.\n",
+        "flows": {
+          "clientCredentials": {
+            "tokenUrl": "https://auth.entidad-financiera.example/token",
+            "scopes": {
+              "connection:test": "Verificar la conexión sin mover dinero",
+              "payment-methods:read": "Consultar instrumentos habilitados y sus límites",
+              "webhooks:manage": "Administrar suscripciones a eventos"
+            }
+          },
+          "authorizationCode": {
+            "authorizationUrl": "https://auth.entidad-financiera.example/authorize",
+            "tokenUrl": "https://auth.entidad-financiera.example/token",
+            "refreshUrl": "https://auth.entidad-financiera.example/token",
+            "scopes": {
+              "consents:write": "Crear y revocar consentimientos de pago",
+              "consents:read": "Consultar consentimientos",
+              "payments:initiate": "Iniciar un cobro contra un consentimiento autorizado",
+              "payments:read": "Consultar pagos y leer el feed de eventos",
+              "payments:capture": "Capturar una autorización de tarjeta de crédito",
+              "payments:cancel": "Anular una autorización no capturada",
+              "refunds:write": "Emitir devoluciones",
+              "refunds:read": "Consultar devoluciones"
+            }
+          }
+        }
+      }
+    },
+    "parameters": {
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "UUID generado por el aliado, único por intento de operación. Misma clave + mismo\ncuerpo dentro de 24 h → se devuelve la respuesta original con\n`Idempotency-Replayed: true` y **sin** volver a llamar al core. Misma clave + cuerpo\ndistinto → `422`. Sin clave → `400`. Es la única forma segura de reintentar.\n\nLa clave se interpreta **dentro del ámbito del `client_id`**: dos aliados con la misma\nclave son dos operaciones independientes; nunca se sirve la respuesta de otro.\n",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "example": "0f8fad5b-d9cb-469f-a165-70867728950e"
+      },
+      "Traceparent": {
+        "name": "traceparent",
+        "in": "header",
+        "required": false,
+        "description": "W3C Trace Context. Si viene, se propaga hasta el BUS y vuelve en `traceId` de cualquier error.",
+        "schema": {
+          "type": "string",
+          "pattern": "^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+        },
+        "example": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+      },
+      "SignatureInput": {
+        "name": "Signature-Input",
+        "in": "header",
+        "required": true,
+        "description": "RFC 9421. Componentes cubiertos por la firma (`@method`, `@target-uri`, `content-digest`, `idempotency-key`, `created`, `keyid`). `created` debe estar a ≤ 5 min del reloj del servidor; fuera de esa ventana la firma se rechaza aunque sea válida.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "sig1=(\"@method\" \"@target-uri\" \"content-digest\" \"idempotency-key\");created=1757548327;keyid=\"aliado-demo-001-2026\""
+      },
+      "Signature": {
+        "name": "Signature",
+        "in": "header",
+        "required": true,
+        "description": "RFC 9421. Firma PS256 sobre los componentes declarados, con la llave privada del aliado (pública en su `jwks_uri`). Da **no repudio** a cada orden.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "sig1=:MEUCIQDx8n...:"
+      },
+      "ContentDigest": {
+        "name": "Content-Digest",
+        "in": "header",
+        "required": true,
+        "description": "RFC 9530. Resumen SHA-256 del cuerpo, cubierto por la firma.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:"
+      },
+      "ConsentId": {
+        "name": "consentId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^cns_[A-Za-z0-9]{12,32}$"
+        },
+        "example": "cns_7Kd9mQ2pLx4Rt8Vw"
+      },
+      "PaymentId": {
+        "name": "paymentId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^pay_[A-Za-z0-9]{12,32}$"
+        },
+        "example": "pay_3Hn8Zc1Qw7Lp5Ky2"
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "description": "Cursor opaco devuelto en `nextCursor` de la página anterior.",
+        "schema": {
+          "type": "string",
+          "maxLength": 512
+        }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 50
+        }
+      }
+    },
+    "headers": {
+      "Location": {
+        "description": "URL del recurso creado.",
+        "schema": {
+          "type": "string",
+          "format": "uri-reference"
+        }
+      },
+      "IdempotencyReplayed": {
+        "description": "`true` cuando la respuesta se sirvió desde el registro de idempotencia sin tocar el core.",
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      "RetryAfter": {
+        "description": "Segundos sugeridos antes de reintentar.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "RateLimitLimit": {
+        "description": "Cuota de la ventana actual para este aliado y scope.",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "RateLimitRemaining": {
+        "description": "Peticiones restantes en la ventana.",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "RateLimitReset": {
+        "description": "Segundos hasta que la ventana se reinicia.",
+        "schema": {
+          "type": "integer"
+        }
+      }
+    },
+    "responses": {
+      "SolicitudInvalida": {
+        "description": "Cuerpo o encabezados inválidos (esquema, `Idempotency-Key` ausente, firma malformada).",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetail"
+            },
+            "examples": {
+              "sinIdempotencyKey": {
+                "$ref": "#/components/examples/error-sin-idempotency-key"
+              }
+            }
+          }
+        }
+      },
+      "NoAutenticado": {
+        "description": "Falta el token, está vencido, o no está vinculado al certificado presentado.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetail"
+            },
+            "examples": {
+              "tokenSinVinculo": {
+                "$ref": "#/components/examples/error-token-sin-vinculo"
+              }
+            }
+          }
+        }
+      },
+      "Prohibido": {
+        "description": "El token no autoriza esta operación: scope insuficiente, el consentimiento en\n`authorization_details` no coincide con el pago, el consentimiento está revocado o\nvencido, o el recurso pertenece a otro aliado.\n",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetail"
+            },
+            "examples": {
+              "montoNoConsentido": {
+                "$ref": "#/components/examples/error-monto-no-consentido"
+              }
+            }
+          }
+        }
+      },
+      "NoEncontrado": {
+        "description": "El recurso no existe **para este aliado**. Se responde igual si existe pero es de otro (no se filtra existencia).",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetail"
+            }
+          }
+        }
+      },
+      "Conflicto": {
+        "description": "La transición no es válida para el estado actual del recurso (p. ej. capturar un pago `CANCELLED`).",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetail"
+            },
+            "examples": {
+              "estadoInvalido": {
+                "$ref": "#/components/examples/error-estado-invalido"
+              }
+            }
+          }
+        }
+      },
+      "NoProcesable": {
+        "description": "Sintácticamente válido pero rechazado por regla de negocio o por reutilizar `Idempotency-Key` con un cuerpo distinto.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetail"
+            },
+            "examples": {
+              "idempotencyKeyReutilizada": {
+                "$ref": "#/components/examples/error-idempotency-key-reutilizada"
+              }
+            }
+          }
+        }
+      },
+      "LimiteExcedido": {
+        "description": "Cuota del aliado agotada para este scope.",
+        "headers": {
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          },
+          "RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimitLimit"
+          },
+          "RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimitRemaining"
+          },
+          "RateLimit-Reset": {
+            "$ref": "#/components/headers/RateLimitReset"
+          }
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetail"
+            }
+          }
+        }
+      },
+      "CoreNoDisponible": {
+        "description": "El core no está disponible y la orden **no se envió** (circuito abierto o fallo\nantes de invocar al BUS). Es seguro reintentar tras `Retry-After` con la **misma**\n`Idempotency-Key`. Este código nunca se usa cuando la orden ya viajó al core.\n",
+        "headers": {
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          }
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetail"
+            },
+            "examples": {
+              "circuitoAbierto": {
+                "$ref": "#/components/examples/error-core-no-disponible"
+              }
+            }
+          }
+        }
+      },
+      "ErrorOAuth": {
+        "description": "Error del servidor de autorización en formato RFC 6749 (`error`, `error_description`).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorOAuth"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "ConfiguracionServidorAutorizacion": {
+        "type": "object",
+        "description": "Subconjunto relevante de los metadatos RFC 8414 / OpenID Discovery.",
+        "required": [
+          "issuer",
+          "pushed_authorization_request_endpoint",
+          "require_pushed_authorization_requests",
+          "authorization_endpoint",
+          "token_endpoint",
+          "jwks_uri",
+          "registration_endpoint",
+          "backchannel_authentication_endpoint",
+          "token_endpoint_auth_methods_supported",
+          "token_endpoint_auth_signing_alg_values_supported",
+          "code_challenge_methods_supported",
+          "tls_client_certificate_bound_access_tokens",
+          "authorization_details_types_supported",
+          "scopes_supported",
+          "grant_types_supported"
+        ],
+        "properties": {
+          "issuer": {
+            "type": "string",
+            "format": "uri",
+            "description": "Identidad del servidor. Todo token que emita lleva `iss` igual a este valor.",
+            "examples": [
+              "https://auth.entidad-financiera.example"
+            ]
+          },
+          "pushed_authorization_request_endpoint": {
+            "type": "string",
+            "format": "uri",
+            "description": "Donde el aliado envía la solicitud de autorización por el canal posterior (PAR).",
+            "examples": [
+              "https://auth.entidad-financiera.example/par"
+            ]
+          },
+          "require_pushed_authorization_requests": {
+            "type": "boolean",
+            "const": true,
+            "description": "Siempre `true` — sin PAR no hay autorización (FAPI 2.0)."
+          },
+          "authorization_endpoint": {
+            "type": "string",
+            "format": "uri",
+            "description": "A donde se redirige al titular para autenticarse y confirmar.",
+            "examples": [
+              "https://auth.entidad-financiera.example/authorize"
+            ]
+          },
+          "token_endpoint": {
+            "type": "string",
+            "format": "uri",
+            "description": "Donde se obtienen y renuevan los tokens.",
+            "examples": [
+              "https://auth.entidad-financiera.example/token"
+            ]
+          },
+          "jwks_uri": {
+            "type": "string",
+            "format": "uri",
+            "description": "Llaves públicas de la entidad para verificar tokens y firmas de webhooks.",
+            "examples": [
+              "https://auth.entidad-financiera.example/jwks"
+            ]
+          },
+          "registration_endpoint": {
+            "type": "string",
+            "format": "uri",
+            "description": "Alta del aliado como cliente OAuth (registro dinámico).",
+            "examples": [
+              "https://auth.entidad-financiera.example/register"
+            ]
+          },
+          "backchannel_authentication_endpoint": {
+            "type": "string",
+            "format": "uri",
+            "description": "Autorización desacoplada (CIBA) para cobros en punto de venta o call center.",
+            "examples": [
+              "https://auth.entidad-financiera.example/bc-authorize"
+            ]
+          },
+          "introspection_endpoint": {
+            "type": "string",
+            "format": "uri",
+            "description": "Consulta si un token sigue vigente.",
+            "examples": [
+              "https://auth.entidad-financiera.example/introspect"
+            ]
+          },
+          "revocation_endpoint": {
+            "type": "string",
+            "format": "uri",
+            "description": "Anula un token antes de su vencimiento.",
+            "examples": [
+              "https://auth.entidad-financiera.example/revoke"
+            ]
+          },
+          "token_endpoint_auth_methods_supported": {
+            "type": "array",
+            "description": "Cómo se identifica el aliado ante `/token`. Solo `private_key_jwt`, el método que nombra la CE 004/2024 (3.2.3 b); mTLS sigue siendo el canal y el ancla del token, no el método de autenticación. Nunca `client_secret_*`.",
+            "items": {
+              "type": "string",
+              "enum": [
+                "private_key_jwt"
+              ]
+            },
+            "examples": [
+              [
+                "private_key_jwt"
+              ]
+            ]
+          },
+          "token_endpoint_auth_signing_alg_values_supported": {
+            "type": "array",
+            "description": "Algoritmos admitidos para firmar el `client_assertion`. HS256 y RS256 se rechazan.",
+            "items": {
+              "type": "string",
+              "enum": [
+                "PS256",
+                "PS384",
+                "PS512",
+                "ES256",
+                "ES384"
+              ]
+            },
+            "examples": [
+              [
+                "PS256",
+                "PS384",
+                "ES256"
+              ]
+            ]
+          },
+          "code_challenge_methods_supported": {
+            "type": "array",
+            "description": "PKCE obligatorio, solo S256.",
+            "items": {
+              "type": "string",
+              "const": "S256"
+            },
+            "examples": [
+              [
+                "S256"
+              ]
+            ]
+          },
+          "tls_client_certificate_bound_access_tokens": {
+            "type": "boolean",
+            "const": true,
+            "description": "Siempre `true` — los tokens van atados al certificado del aliado (RFC 8705)."
+          },
+          "authorization_details_types_supported": {
+            "type": "array",
+            "description": "Tipos de consentimiento que el servidor entiende en `authorization_details` (RFC 9396).",
+            "items": {
+              "type": "string"
+            },
+            "examples": [
+              [
+                "payment_consent"
+              ]
+            ]
+          },
+          "scopes_supported": {
+            "type": "array",
+            "description": "Catálogo cerrado de scopes. Cuáles se conceden a cada aliado se decide en el alta.",
+            "items": {
+              "type": "string"
+            },
+            "examples": [
+              [
+                "connection:test",
+                "payment-methods:read",
+                "webhooks:manage",
+                "consents:write",
+                "consents:read",
+                "payments:initiate",
+                "payments:read",
+                "payments:capture",
+                "payments:cancel",
+                "refunds:write",
+                "refunds:read"
+              ]
+            ]
+          },
+          "grant_types_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "examples": [
+              [
+                "client_credentials",
+                "authorization_code",
+                "urn:openid:params:grant-type:ciba",
+                "refresh_token"
+              ]
+            ]
+          },
+          "authorization_response_iss_parameter_supported": {
+            "type": "boolean",
+            "description": "El servidor incluye `iss` en cada respuesta de autorización (RFC 9207), contra ataques de confusión de emisor.",
+            "examples": [
+              true
+            ]
+          }
+        }
+      },
+      "JwkSet": {
+        "type": "object",
+        "required": [
+          "keys"
+        ],
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "kty",
+                "kid",
+                "use",
+                "alg"
+              ],
+              "properties": {
+                "kty": {
+                  "type": "string",
+                  "enum": [
+                    "RSA",
+                    "EC"
+                  ],
+                  "examples": [
+                    "RSA"
+                  ]
+                },
+                "kid": {
+                  "type": "string",
+                  "description": "Identificador de la llave; cada token y cada webhook dicen con cuál se firmaron.",
+                  "examples": [
+                    "entidad-2026-09"
+                  ]
+                },
+                "use": {
+                  "type": "string",
+                  "enum": [
+                    "sig"
+                  ]
+                },
+                "alg": {
+                  "type": "string",
+                  "enum": [
+                    "PS256",
+                    "PS384",
+                    "PS512",
+                    "ES256",
+                    "ES384"
+                  ],
+                  "examples": [
+                    "PS256"
+                  ]
+                },
+                "n": {
+                  "type": "string",
+                  "description": "Módulo RSA en base64url.",
+                  "examples": [
+                    "sXchDaQebHnPiGvyDOAT4saGEUetSyo9MKLOoWFsueri23bOdgWp4Dy4WsJHK9V6uSPVKt3MSQ1pjIrgGdDlaX4Pe9w0nI9Mk8W2ZsnKmA5g5b0R3yEwVjbpVpOUYDl-K3wJnAmEQG5eL0V0lfVvW6KlSf9qiwNiskDi4-_2VLUoQzZLJIoYc5uk1JJtUfz1Q"
+                  ]
+                },
+                "e": {
+                  "type": "string",
+                  "examples": [
+                    "AQAB"
+                  ]
+                },
+                "crv": {
+                  "type": "string"
+                },
+                "x": {
+                  "type": "string"
+                },
+                "y": {
+                  "type": "string"
+                },
+                "x5c": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "RegistroClienteRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "software_statement",
+          "redirect_uris",
+          "jwks_uri",
+          "token_endpoint_auth_method",
+          "scope"
+        ],
+        "properties": {
+          "software_statement": {
+            "type": "string",
+            "description": "JWT firmado por el directorio (o por la entidad durante el alta) que identifica al aliado y sus capacidades. Incluye `x5t#S256` del certificado autorizado, `exp` corto y `jti` de un solo uso.",
+            "examples": [
+              "eyJhbGciOiJQUzI1NiIsImtpZCI6ImVudGlkYWQtMjAyNi0wOSJ9.eyJpc3MiOiJodHRwczovL2F1dGguZW50aWRhZC1maW5hbmNpZXJhLmV4YW1wbGUiLCJzb2Z0d2FyZV9pZCI6ImFsaWFkby1kZW1vLTAwMSIsInNvZnR3YXJlX2NsaWVudF9uYW1lIjoiVGllbmRhIEVqZW1wbG8gUy5BLlMuIiwieDV0I1MyNTYiOiJTM1haMG9YazhfMnZHMVE5cjV3cTRiWms4WWwwbU43cFEyc1Q0dVY2d1g4IiwianRpIjoiN2Y0YjJjOWUiLCJleHAiOjE3NTc1NTAxMjd9.firma-de-ejemplo"
+            ]
+          },
+          "redirect_uris": {
+            "type": "array",
+            "minItems": 1,
+            "description": "Solo `https`, sin comodines ni fragmentos; coincidencia exacta en la autorización. `localhost` solo se admite en sandbox.",
+            "items": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://[^#*]+$"
+            },
+            "examples": [
+              [
+                "https://aliado.example/callback"
+              ]
+            ]
+          },
+          "jwks_uri": {
+            "type": "string",
+            "format": "uri",
+            "description": "Donde el aliado publica sus llaves públicas (para `private_key_jwt` y firma de mensajes).",
+            "examples": [
+              "https://aliado.example/.well-known/jwks.json"
+            ]
+          },
+          "token_endpoint_auth_method": {
+            "type": "string",
+            "enum": [
+              "private_key_jwt"
+            ],
+            "examples": [
+              "private_key_jwt"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "description": "Scopes solicitados, separados por espacio. Se conceden solo los aprobados en el alta.",
+            "examples": [
+              "connection:test payment-methods:read webhooks:manage consents:write consents:read payments:initiate payments:read"
+            ]
+          },
+          "backchannel_token_delivery_mode": {
+            "type": "string",
+            "enum": [
+              "poll",
+              "ping"
+            ]
+          },
+          "backchannel_client_notification_endpoint": {
+            "type": "string",
+            "format": "uri"
+          }
+        }
+      },
+      "RegistroClienteResponse": {
+        "type": "object",
+        "required": [
+          "client_id",
+          "client_id_issued_at",
+          "redirect_uris",
+          "jwks_uri",
+          "token_endpoint_auth_method",
+          "scope"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "description": "El identificador del aliado; va en cada PAR y en cada `client_assertion`.",
+            "examples": [
+              "aliado-demo-001"
+            ]
+          },
+          "client_id_issued_at": {
+            "type": "integer",
+            "description": "Instante de emisión (epoch, segundos).",
+            "examples": [
+              1757548327
+            ]
+          },
+          "redirect_uris": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uri"
+            },
+            "examples": [
+              [
+                "https://aliado.example/callback"
+              ]
+            ]
+          },
+          "jwks_uri": {
+            "type": "string",
+            "format": "uri",
+            "examples": [
+              "https://aliado.example/.well-known/jwks.json"
+            ]
+          },
+          "token_endpoint_auth_method": {
+            "type": "string",
+            "examples": [
+              "private_key_jwt"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "description": "Scopes efectivamente concedidos — pueden ser menos que los solicitados.",
+            "examples": [
+              "connection:test payment-methods:read consents:write consents:read payments:initiate payments:read"
+            ]
+          },
+          "registration_client_uri": {
+            "type": "string",
+            "format": "uri",
+            "description": "Donde consultar o actualizar este registro (RFC 7592).",
+            "examples": [
+              "https://auth.entidad-financiera.example/register/aliado-demo-001"
+            ]
+          }
+        }
+      },
+      "ParRequest": {
+        "type": "object",
+        "required": [
+          "client_id",
+          "response_type",
+          "redirect_uri",
+          "scope",
+          "code_challenge",
+          "code_challenge_method",
+          "authorization_details"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "examples": [
+              "aliado-demo-001"
+            ]
+          },
+          "response_type": {
+            "type": "string",
+            "const": "code"
+          },
+          "redirect_uri": {
+            "type": "string",
+            "format": "uri",
+            "description": "Debe coincidir exactamente con una registrada.",
+            "examples": [
+              "https://aliado.example/callback"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "examples": [
+              "consents:read payments:initiate payments:read"
+            ]
+          },
+          "code_challenge": {
+            "type": "string",
+            "description": "SHA-256 en base64url del `code_verifier` que el aliado guardó (PKCE).",
+            "examples": [
+              "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+            ]
+          },
+          "code_challenge_method": {
+            "type": "string",
+            "const": "S256"
+          },
+          "authorization_details": {
+            "type": "string",
+            "description": "JSON serializado de un arreglo de `AuthorizationDetail` (RFC 9396) con el consentimiento exacto.",
+            "examples": [
+              "[{\"type\":\"payment_consent\",\"consentId\":\"cns_7Kd9mQ2pLx4Rt8Vw\",\"actions\":[\"initiate\",\"read\"],\"instrumentType\":\"SAVINGS_ACCOUNT\",\"amount\":{\"amount\":\"150000.00\",\"currency\":\"COP\"},\"creditorName\":\"Tienda Ejemplo S.A.S.\"}]"
+            ]
+          },
+          "client_assertion_type": {
+            "type": "string",
+            "const": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+          },
+          "client_assertion": {
+            "type": "string",
+            "description": "JWT `private_key_jwt` firmado con PS256+, `aud` = issuer exacto del servidor.",
+            "examples": [
+              "eyJhbGciOiJQUzI1NiIsImtpZCI6ImFsaWFkby1kZW1vLTAwMS0yMDI2In0.eyJpc3MiOiJhbGlhZG8tZGVtby0wMDEiLCJzdWIiOiJhbGlhZG8tZGVtby0wMDEiLCJhdWQiOiJodHRwczovL2F1dGguZW50aWRhZC1maW5hbmNpZXJhLmV4YW1wbGUiLCJqdGkiOiI5YzJlNGY3YSIsImV4cCI6MTc1NzU0ODM4N30.firma-del-aliado"
+            ]
+          }
+        }
+      },
+      "ParResponse": {
+        "type": "object",
+        "required": [
+          "request_uri",
+          "expires_in"
+        ],
+        "properties": {
+          "request_uri": {
+            "type": "string",
+            "description": "Referencia de un solo uso para `/authorize?client_id=…&request_uri=…`.",
+            "examples": [
+              "urn:ietf:params:oauth:request_uri:6esc_11ACC5bwc014ltc14eY22c"
+            ]
+          },
+          "expires_in": {
+            "type": "integer",
+            "description": "Segundos de validez (≤ 60).",
+            "examples": [
+              60
+            ]
+          }
+        }
+      },
+      "CibaRequest": {
+        "type": "object",
+        "required": [
+          "client_id",
+          "scope",
+          "login_hint",
+          "authorization_details",
+          "binding_message"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "examples": [
+              "aliado-demo-001"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "examples": [
+              "consents:read payments:initiate payments:read"
+            ]
+          },
+          "login_hint": {
+            "type": "string",
+            "description": "Identificador del titular que la entidad ya conoce. Nunca credenciales.",
+            "examples": [
+              "CC:1032456789"
+            ]
+          },
+          "authorization_details": {
+            "type": "string",
+            "description": "JSON serializado con el consentimiento exacto (RFC 9396)."
+          },
+          "binding_message": {
+            "type": "string",
+            "maxLength": 20,
+            "description": "Código corto que se muestra en el punto de venta y en la app del titular para que verifique que autoriza *esa* operación.",
+            "examples": [
+              "K7P2"
+            ]
+          },
+          "requested_expiry": {
+            "type": "integer",
+            "description": "Segundos que el titular tiene para responder.",
+            "examples": [
+              120
+            ]
+          },
+          "client_assertion_type": {
+            "type": "string"
+          },
+          "client_assertion": {
+            "type": "string"
+          }
+        }
+      },
+      "CibaResponse": {
+        "type": "object",
+        "required": [
+          "auth_req_id",
+          "expires_in"
+        ],
+        "properties": {
+          "auth_req_id": {
+            "type": "string",
+            "examples": [
+              "1c266114-a1be-4252-8ad1-04986c5b9ac1"
+            ]
+          },
+          "expires_in": {
+            "type": "integer",
+            "examples": [
+              120
+            ]
+          },
+          "interval": {
+            "type": "integer",
+            "description": "Segundos mínimos entre consultas a `/token` en modo *poll*.",
+            "examples": [
+              5
+            ]
+          }
+        }
+      },
+      "TokenRequest": {
+        "type": "object",
+        "required": [
+          "grant_type"
+        ],
+        "properties": {
+          "grant_type": {
+            "type": "string",
+            "enum": [
+              "client_credentials",
+              "authorization_code",
+              "urn:openid:params:grant-type:ciba",
+              "refresh_token"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "description": "El código recibido en la redirección (vida ≤ 60 s, un solo uso).",
+            "examples": [
+              "SplxlOBeZQQYbYS6WxSbIA"
+            ]
+          },
+          "code_verifier": {
+            "type": "string",
+            "description": "El secreto PKCE original; el servidor lo hashea y compara con el `code_challenge` del PAR.",
+            "examples": [
+              "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+            ]
+          },
+          "redirect_uri": {
+            "type": "string",
+            "format": "uri",
+            "examples": [
+              "https://aliado.example/callback"
+            ]
+          },
+          "auth_req_id": {
+            "type": "string",
+            "description": "Solo grant CIBA.",
+            "examples": [
+              "1c266114-a1be-4252-8ad1-04986c5b9ac1"
+            ]
+          },
+          "refresh_token": {
+            "type": "string",
+            "description": "Solo grant `refresh_token`; rota en cada uso."
+          },
+          "scope": {
+            "type": "string",
+            "examples": [
+              "connection:test"
+            ]
+          },
+          "client_id": {
+            "type": "string",
+            "examples": [
+              "aliado-demo-001"
+            ]
+          },
+          "client_assertion_type": {
+            "type": "string",
+            "examples": [
+              "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+            ]
+          },
+          "client_assertion": {
+            "type": "string",
+            "description": "JWT firmado con la llave privada del aliado (PS256+)."
+          }
+        }
+      },
+      "TokenResponse": {
+        "type": "object",
+        "required": [
+          "access_token",
+          "token_type",
+          "expires_in",
+          "scope"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "description": "JWT PS256+, vinculado al certificado (`cnf.x5t#S256`).",
+            "examples": [
+              "eyJhbGciOiJQUzI1NiIsImtpZCI6ImVudGlkYWQtMjAyNi0wOSJ9.eyJpc3MiOiJodHRwczovL2F1dGguZW50aWRhZC1maW5hbmNpZXJhLmV4YW1wbGUiLCJzdWIiOiJhbGlhZG8tZGVtby0wMDEiLCJjbmYiOnsieDV0I1MyNTYiOiJTM1haMG9YazhfMnZHMVE5cjV3cTRiWms4WWwwbU43cFEyc1Q0dVY2d1g4In0sInNjb3BlIjoiY29uc2VudHM6cmVhZCBwYXltZW50czppbml0aWF0ZSBwYXltZW50czpyZWFkIiwiZXhwIjoxNzU3NTQ4OTI3fQ.firma-de-ejemplo"
+            ]
+          },
+          "token_type": {
+            "type": "string",
+            "const": "Bearer"
+          },
+          "expires_in": {
+            "type": "integer",
+            "description": "Segundos. Corto por diseño (≤ 600).",
+            "examples": [
+              600
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "examples": [
+              "consents:read payments:initiate payments:read"
+            ]
+          },
+          "refresh_token": {
+            "type": "string",
+            "description": "Solo para consentimientos `RECURRING`."
+          },
+          "authorization_details": {
+            "type": "array",
+            "description": "Lo que el titular autorizó, tal como quedó atado al token.",
+            "items": {
+              "$ref": "#/components/schemas/AuthorizationDetail"
+            }
+          }
+        }
+      },
+      "AuthorizationDetail": {
+        "type": "object",
+        "description": "RFC 9396. Ata el token a un consentimiento concreto.",
+        "required": [
+          "type",
+          "consentId",
+          "actions"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "payment_consent"
+          },
+          "consentId": {
+            "type": "string",
+            "pattern": "^cns_[A-Za-z0-9]{12,32}$",
+            "examples": [
+              "cns_7Kd9mQ2pLx4Rt8Vw"
+            ]
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "initiate",
+                "read",
+                "capture",
+                "cancel",
+                "refund"
+              ]
+            },
+            "examples": [
+              [
+                "initiate",
+                "read"
+              ]
+            ]
+          },
+          "instrumentType": {
+            "$ref": "#/components/schemas/InstrumentType"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "creditorName": {
+            "type": "string",
+            "examples": [
+              "Tienda Ejemplo S.A.S."
+            ]
+          }
+        }
+      },
+      "ErrorOAuth": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "examples": [
+              "invalid_request",
+              "invalid_client",
+              "invalid_grant",
+              "invalid_scope",
+              "authorization_pending"
+            ]
+          },
+          "error_description": {
+            "type": "string",
+            "examples": [
+              "El client_assertion tiene un aud distinto del issuer"
+            ]
+          }
+        }
+      },
+      "ConnectionTestResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "environment",
+          "clientId",
+          "certificateThumbprint",
+          "tokenBoundToCertificate",
+          "effectiveScopes",
+          "serverTime"
+        ],
+        "properties": {
+          "environment": {
+            "type": "string",
+            "enum": [
+              "sandbox",
+              "production"
+            ],
+            "description": "Ambiente que atendió la petición. Evita el error clásico de creer que se está en sandbox."
+          },
+          "clientId": {
+            "type": "string",
+            "description": "Identidad del aliado resuelta a partir del certificado presentado.",
+            "examples": [
+              "aliado-demo-001"
+            ]
+          },
+          "certificateThumbprint": {
+            "type": "string",
+            "description": "Huella SHA-256 del certificado de transporte, en base64url (`x5t#S256`)."
+          },
+          "tokenBoundToCertificate": {
+            "type": "boolean",
+            "description": "`true` si el `cnf.x5t#S256` del token coincide con la huella del certificado de\nesta conexión (RFC 8705). Si es `false`, el token no es de este canal.\n"
+          },
+          "effectiveScopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "serverTime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Hora del servidor, para detectar desfases de reloj antes de firmar."
+          }
+        }
+      },
+      "Amount": {
+        "type": "object",
+        "description": "ISO 20022 `ActiveOrHistoricCurrencyAndAmount`. Cadena decimal, nunca flotante.",
+        "additionalProperties": false,
+        "required": [
+          "amount",
+          "currency"
+        ],
+        "properties": {
+          "amount": {
+            "type": "string",
+            "pattern": "^[0-9]{1,15}(\\.[0-9]{1,2})?$",
+            "description": "Hasta 2 decimales. El separador es punto.",
+            "examples": [
+              "150000.00"
+            ]
+          },
+          "currency": {
+            "type": "string",
+            "enum": [
+              "COP"
+            ],
+            "description": "ISO 4217. Solo pesos colombianos en esta versión."
+          }
+        }
+      },
+      "InstrumentType": {
+        "type": "string",
+        "enum": [
+          "SAVINGS_ACCOUNT",
+          "CREDIT_CARD"
+        ]
+      },
+      "Instrument": {
+        "type": "object",
+        "description": "Producto del titular contra el que se cobra, **tal como lo eligió en la entidad**.\nNunca incluye el número completo: `productReference` es una referencia opaca y\n`maskedNumber` sirve solo para mostrar.\n",
+        "required": [
+          "type",
+          "productReference",
+          "maskedNumber"
+        ],
+        "properties": {
+          "type": {
+            "$ref": "#/components/schemas/InstrumentType"
+          },
+          "productReference": {
+            "type": "string",
+            "description": "Referencia opaca y estable del producto, válida solo para este aliado.",
+            "examples": [
+              "prd_9Qz2Lm7Xw4Kd8Vn1"
+            ]
+          },
+          "maskedNumber": {
+            "type": "string",
+            "pattern": "^\\*+[0-9]{4}$",
+            "examples": [
+              "****4821"
+            ]
+          },
+          "brand": {
+            "type": "string",
+            "description": "Solo tarjeta de crédito.",
+            "enum": [
+              "VISA",
+              "MASTERCARD",
+              "AMEX",
+              "DINERS"
+            ]
+          }
+        }
+      },
+      "Identification": {
+        "type": "object",
+        "description": "ISO 20022 `PartyIdentification` — identificación colombiana.",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "number"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "NIT",
+              "CC",
+              "CE",
+              "PA",
+              "TI"
+            ]
+          },
+          "number": {
+            "type": "string",
+            "pattern": "^[0-9A-Za-z-]{4,20}$"
+          }
+        }
+      },
+      "Creditor": {
+        "type": "object",
+        "description": "Beneficiario del cobro — normalmente el propio aliado o el comercio que representa.",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "identification"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 140,
+            "examples": [
+              "Tienda Ejemplo S.A.S."
+            ]
+          },
+          "identification": {
+            "$ref": "#/components/schemas/Identification"
+          },
+          "merchantCategoryCode": {
+            "type": "string",
+            "pattern": "^[0-9]{4}$",
+            "description": "MCC ISO 18245. Requerido para tarjeta de crédito."
+          }
+        }
+      },
+      "ThirdParty": {
+        "type": "object",
+        "description": "Identificación del aliado tal como se muestra al titular (razón social y domicilio), tomada del registro — no del cuerpo de la petición.",
+        "required": [
+          "name",
+          "domicile"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "domicile": {
+            "type": "string"
+          }
+        }
+      },
+      "Recurrence": {
+        "type": "object",
+        "description": "Solo consentimientos `RECURRING`. Topes explícitos: la norma prohíbe autorizaciones abiertas.",
+        "additionalProperties": false,
+        "required": [
+          "frequency",
+          "maxAmountPerPayment",
+          "maxAmountPerPeriod",
+          "validUntil"
+        ],
+        "properties": {
+          "frequency": {
+            "type": "string",
+            "enum": [
+              "WEEKLY",
+              "BIWEEKLY",
+              "MONTHLY",
+              "QUARTERLY"
+            ]
+          },
+          "maxAmountPerPayment": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "maxAmountPerPeriod": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "validUntil": {
+            "type": "string",
+            "format": "date",
+            "description": "Fin de la serie. Nunca abierto."
+          }
+        }
+      },
+      "PaymentConsentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "instrumentType",
+          "amount",
+          "creditor",
+          "purpose",
+          "expiresAt",
+          "remittanceInformation"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "SINGLE",
+              "RECURRING"
+            ]
+          },
+          "instrumentType": {
+            "$ref": "#/components/schemas/InstrumentType"
+          },
+          "amount": {
+            "description": "Monto exacto (`SINGLE`) o monto del primer cobro (`RECURRING`).",
+            "$ref": "#/components/schemas/Amount"
+          },
+          "recurrence": {
+            "$ref": "#/components/schemas/Recurrence"
+          },
+          "creditor": {
+            "$ref": "#/components/schemas/Creditor"
+          },
+          "purpose": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "Finalidad **específica** que verá el titular. Obligatoria por norma; nunca genérica.",
+            "examples": [
+              "Pago de la orden 48213 — suscripción anual"
+            ]
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Hasta cuándo puede usarse el consentimiento (tiempo de la finalidad). Máximo 30 días para `SINGLE`."
+          },
+          "remittanceInformation": {
+            "type": "string",
+            "maxLength": 140,
+            "description": "Referencia que verá el titular en su extracto."
+          },
+          "customerHint": {
+            "type": "object",
+            "description": "Solo para flujo `DECOUPLED` (CIBA). Un dato que el titular ya entregó al aliado y\nque la entidad reconoce. Nunca credenciales. **La respuesta es idéntica exista o no\nun cliente con esa identificación** (`201 AWAITING_AUTHORISATION`): si nadie puede\nconfirmar, el consentimiento simplemente vence. Este endpoint no sirve para saber\nquién es cliente de la entidad, y los consentimientos `DECOUPLED` tienen cuota propia.\n",
+            "additionalProperties": false,
+            "properties": {
+              "identification": {
+                "$ref": "#/components/schemas/Identification"
+              }
+            }
+          },
+          "authorizationMode": {
+            "type": "string",
+            "enum": [
+              "REDIRECT",
+              "DECOUPLED"
+            ],
+            "default": "REDIRECT"
+          }
+        }
+      },
+      "PaymentConsentStatus": {
+        "type": "string",
+        "enum": [
+          "AWAITING_AUTHORISATION",
+          "AUTHORISED",
+          "REJECTED",
+          "REVOKED",
+          "EXPIRED",
+          "CONSUMED"
+        ],
+        "description": "`AWAITING_AUTHORISATION` → `AUTHORISED` cuando el titular confirma en la entidad;\n`REJECTED` si deniega; `EXPIRED` si vence sin respuesta; `REVOKED` por el aliado o el\ntitular; `CONSUMED` cuando un consentimiento `SINGLE` ya respaldó su pago.\n"
+      },
+      "PaymentConsent": {
+        "type": "object",
+        "required": [
+          "consentId",
+          "status",
+          "type",
+          "instrumentType",
+          "amount",
+          "creditor",
+          "thirdParty",
+          "purpose",
+          "expiresAt",
+          "remittanceInformation",
+          "authorization",
+          "createdAt",
+          "links"
+        ],
+        "properties": {
+          "consentId": {
+            "type": "string",
+            "pattern": "^cns_[A-Za-z0-9]{12,32}$"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PaymentConsentStatus"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "SINGLE",
+              "RECURRING"
+            ]
+          },
+          "instrumentType": {
+            "$ref": "#/components/schemas/InstrumentType"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "recurrence": {
+            "$ref": "#/components/schemas/Recurrence"
+          },
+          "creditor": {
+            "$ref": "#/components/schemas/Creditor"
+          },
+          "thirdParty": {
+            "$ref": "#/components/schemas/ThirdParty"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "remittanceInformation": {
+            "type": "string"
+          },
+          "instrument": {
+            "description": "Presente desde `AUTHORISED`: el producto que el titular eligió.",
+            "$ref": "#/components/schemas/Instrument"
+          },
+          "authorization": {
+            "type": "object",
+            "description": "Cómo continuar para obtener la autorización del titular.",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "REDIRECT",
+                  "DECOUPLED"
+                ]
+              },
+              "authorizationDetails": {
+                "description": "Lo que el aliado debe enviar tal cual en `authorization_details` del PAR o del CIBA.",
+                "$ref": "#/components/schemas/AuthorizationDetail"
+              }
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "authorisedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "links": {
+            "type": "object",
+            "required": [
+              "self"
+            ],
+            "properties": {
+              "self": {
+                "type": "string",
+                "format": "uri-reference"
+              }
+            }
+          }
+        }
+      },
+      "PaymentStatus": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "AUTHORIZED",
+          "CAPTURED",
+          "SETTLED",
+          "PARTIALLY_REFUNDED",
+          "REFUNDED",
+          "REJECTED",
+          "CANCELLED",
+          "EXPIRED",
+          "FAILED"
+        ],
+        "description": "Ahorros: `PENDING` → `CAPTURED` → `SETTLED`. Tarjeta: `PENDING` → `AUTHORIZED` →\n`CAPTURED` → `SETTLED`. Desde `CAPTURED`/`SETTLED`: `PARTIALLY_REFUNDED` → `REFUNDED`.\nTerminales sin dinero movido: `REJECTED` (el core dijo no), `CANCELLED` (anulación),\n`EXPIRED` (autorización vencida sin captura), `FAILED` (error técnico confirmado —\nnunca se usa mientras haya duda; para eso está `PENDING`).\n"
+      },
+      "PaymentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "consentId",
+          "amount"
+        ],
+        "properties": {
+          "consentId": {
+            "type": "string",
+            "pattern": "^cns_[A-Za-z0-9]{12,32}$"
+          },
+          "amount": {
+            "description": "Debe coincidir con el consentimiento (`SINGLE`) o respetar sus topes (`RECURRING`).",
+            "$ref": "#/components/schemas/Amount"
+          },
+          "remittanceInformation": {
+            "type": "string",
+            "maxLength": 140,
+            "description": "Si se omite, se usa la del consentimiento."
+          },
+          "installments": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 36,
+            "default": 1,
+            "description": "Número de cuotas. Solo tarjeta de crédito."
+          },
+          "captureMode": {
+            "type": "string",
+            "enum": [
+              "AUTOMATIC",
+              "MANUAL"
+            ],
+            "default": "AUTOMATIC",
+            "description": "Solo tarjeta. `MANUAL` deja el pago en `AUTHORIZED` hasta que el aliado capture (p. ej. al despachar)."
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Hasta 10 pares clave-valor del aliado (p. ej. su número de orden). Se devuelven tal cual; nunca se interpretan ni se muestran al titular.",
+            "maxProperties": 10,
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 200
+            }
+          }
+        }
+      },
+      "Settlement": {
+        "type": "object",
+        "description": "Información de liquidación, cuando aplica.",
+        "properties": {
+          "rail": {
+            "type": "string",
+            "enum": [
+              "ON_US",
+              "INSTANT",
+              "ACH",
+              "CARD_NETWORK"
+            ],
+            "description": "Por dónde se movió el dinero. `INSTANT` cubre pagos inmediatos interoperados."
+          },
+          "reference": {
+            "type": "string",
+            "description": "Referencia del core o del riel, útil para conciliación con el extracto."
+          },
+          "settledAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expectedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Estimación cuando aún no está liquidado (p. ej. ciclo ACH)."
+          }
+        }
+      },
+      "Payment": {
+        "type": "object",
+        "required": [
+          "paymentId",
+          "consentId",
+          "status",
+          "instrument",
+          "amount",
+          "capturedAmount",
+          "refundedAmount",
+          "creditor",
+          "remittanceInformation",
+          "createdAt",
+          "updatedAt",
+          "links"
+        ],
+        "properties": {
+          "paymentId": {
+            "type": "string",
+            "pattern": "^pay_[A-Za-z0-9]{12,32}$"
+          },
+          "consentId": {
+            "type": "string",
+            "pattern": "^cns_[A-Za-z0-9]{12,32}$"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PaymentStatus"
+          },
+          "statusReason": {
+            "type": "object",
+            "description": "Presente en `REJECTED`, `FAILED` y `PENDING`. `code` viene del catálogo público; nunca expone códigos internos del core.",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "examples": [
+                  "INSUFFICIENT_FUNDS",
+                  "LIMIT_EXCEEDED",
+                  "CORE_TIMEOUT",
+                  "CARD_DECLINED",
+                  "PRODUCT_BLOCKED"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          },
+          "instrument": {
+            "$ref": "#/components/schemas/Instrument"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "capturedAmount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "refundedAmount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "creditor": {
+            "$ref": "#/components/schemas/Creditor"
+          },
+          "remittanceInformation": {
+            "type": "string"
+          },
+          "installments": {
+            "type": "integer"
+          },
+          "captureMode": {
+            "type": "string",
+            "enum": [
+              "AUTOMATIC",
+              "MANUAL"
+            ]
+          },
+          "settlement": {
+            "$ref": "#/components/schemas/Settlement"
+          },
+          "authorizationExpiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Solo tarjeta en `AUTHORIZED`: cuándo se libera el cupo si no se captura."
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "links": {
+            "type": "object",
+            "required": [
+              "self"
+            ],
+            "properties": {
+              "self": {
+                "type": "string",
+                "format": "uri-reference"
+              },
+              "consent": {
+                "type": "string",
+                "format": "uri-reference"
+              },
+              "captures": {
+                "type": "string",
+                "format": "uri-reference"
+              },
+              "refunds": {
+                "type": "string",
+                "format": "uri-reference"
+              }
+            }
+          }
+        }
+      },
+      "PaymentPage": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Payment"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` cuando no hay más páginas."
+          }
+        }
+      },
+      "CaptureRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "amount": {
+            "description": "Si se omite, captura el saldo autorizado restante.",
+            "$ref": "#/components/schemas/Amount"
+          },
+          "remittanceInformation": {
+            "type": "string",
+            "maxLength": 140
+          }
+        }
+      },
+      "Capture": {
+        "type": "object",
+        "required": [
+          "captureId",
+          "paymentId",
+          "amount",
+          "status",
+          "createdAt"
+        ],
+        "properties": {
+          "captureId": {
+            "type": "string",
+            "pattern": "^cap_[A-Za-z0-9]{12,32}$"
+          },
+          "paymentId": {
+            "type": "string",
+            "pattern": "^pay_[A-Za-z0-9]{12,32}$"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PROCESSED",
+              "PENDING",
+              "FAILED"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CancellationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "enum": [
+              "CUSTOMER_REQUEST",
+              "ORDER_CANCELLED",
+              "DUPLICATE",
+              "OTHER"
+            ]
+          },
+          "comment": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      },
+      "Cancellation": {
+        "type": "object",
+        "required": [
+          "cancellationId",
+          "paymentId",
+          "status",
+          "reason",
+          "createdAt"
+        ],
+        "properties": {
+          "cancellationId": {
+            "type": "string",
+            "pattern": "^cnl_[A-Za-z0-9]{12,32}$"
+          },
+          "paymentId": {
+            "type": "string",
+            "pattern": "^pay_[A-Za-z0-9]{12,32}$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PROCESSED",
+              "FAILED"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "RefundRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "amount": {
+            "description": "Si se omite, devuelve todo lo capturado y aún no devuelto.",
+            "$ref": "#/components/schemas/Amount"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "CUSTOMER_REQUEST",
+              "DUPLICATE",
+              "FRAUD",
+              "PRODUCT_NOT_DELIVERED",
+              "OTHER"
+            ]
+          },
+          "remittanceInformation": {
+            "type": "string",
+            "maxLength": 140
+          }
+        }
+      },
+      "Refund": {
+        "type": "object",
+        "required": [
+          "refundId",
+          "paymentId",
+          "amount",
+          "status",
+          "reason",
+          "createdAt",
+          "links"
+        ],
+        "properties": {
+          "refundId": {
+            "type": "string",
+            "pattern": "^rfd_[A-Za-z0-9]{12,32}$"
+          },
+          "paymentId": {
+            "type": "string",
+            "pattern": "^pay_[A-Za-z0-9]{12,32}$"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "PROCESSED",
+              "REJECTED",
+              "FAILED"
+            ],
+            "description": "`PENDING` mientras el riel confirma (p. ej. devolución a tarjeta, que la franquicia liquida en días)."
+          },
+          "reason": {
+            "type": "string"
+          },
+          "settlement": {
+            "$ref": "#/components/schemas/Settlement"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "links": {
+            "type": "object",
+            "required": [
+              "self",
+              "payment"
+            ],
+            "properties": {
+              "self": {
+                "type": "string",
+                "format": "uri-reference"
+              },
+              "payment": {
+                "type": "string",
+                "format": "uri-reference"
+              }
+            }
+          }
+        }
+      },
+      "PaymentMethod": {
+        "type": "object",
+        "required": [
+          "instrumentType",
+          "enabled",
+          "currency",
+          "limits",
+          "features"
+        ],
+        "properties": {
+          "instrumentType": {
+            "$ref": "#/components/schemas/InstrumentType"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "currency": {
+            "type": "string",
+            "enum": [
+              "COP"
+            ]
+          },
+          "limits": {
+            "type": "object",
+            "required": [
+              "minAmount",
+              "maxAmountPerPayment",
+              "maxAmountPerDay"
+            ],
+            "properties": {
+              "minAmount": {
+                "$ref": "#/components/schemas/Amount"
+              },
+              "maxAmountPerPayment": {
+                "$ref": "#/components/schemas/Amount"
+              },
+              "maxAmountPerDay": {
+                "$ref": "#/components/schemas/Amount"
+              }
+            }
+          },
+          "features": {
+            "type": "object",
+            "required": [
+              "recurring",
+              "partialCapture",
+              "partialRefund",
+              "installments",
+              "decoupledAuthorization"
+            ],
+            "properties": {
+              "recurring": {
+                "type": "boolean"
+              },
+              "partialCapture": {
+                "type": "boolean"
+              },
+              "partialRefund": {
+                "type": "boolean"
+              },
+              "installments": {
+                "type": "boolean"
+              },
+              "decoupledAuthorization": {
+                "type": "boolean"
+              }
+            }
+          },
+          "settlementWindow": {
+            "type": "string",
+            "description": "Descripción legible de la ventana de liquidación (p. ej. \"Inmediata\" o \"Ciclo ACH, día hábil siguiente\")."
+          }
+        }
+      },
+      "EventType": {
+        "type": "string",
+        "enum": [
+          "consent.authorised",
+          "consent.rejected",
+          "consent.revoked",
+          "consent.expired",
+          "payment.captured",
+          "payment.settled",
+          "payment.rejected",
+          "payment.failed",
+          "payment.expired",
+          "refund.processed",
+          "refund.rejected",
+          "webhook.suspended"
+        ]
+      },
+      "Event": {
+        "type": "object",
+        "required": [
+          "eventId",
+          "type",
+          "occurredAt",
+          "resource"
+        ],
+        "properties": {
+          "eventId": {
+            "type": "string",
+            "pattern": "^evt_[A-Za-z0-9]{12,32}$"
+          },
+          "type": {
+            "$ref": "#/components/schemas/EventType"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resource": {
+            "type": "object",
+            "description": "Qué cambió. El aliado consulta el recurso; el evento no reemplaza al `GET`.",
+            "required": [
+              "type",
+              "id",
+              "href"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "payment",
+                  "consent",
+                  "refund",
+                  "webhook"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "href": {
+                "type": "string",
+                "format": "uri-reference"
+              }
+            }
+          },
+          "data": {
+            "type": "object",
+            "description": "Resumen mínimo (estado nuevo, monto). Nunca datos del titular.",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "amount": {
+                "$ref": "#/components/schemas/Amount"
+              }
+            }
+          }
+        }
+      },
+      "EventPage": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "WebhookRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "url",
+          "events"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^https://"
+          },
+          "events": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/EventType"
+            }
+          }
+        }
+      },
+      "Webhook": {
+        "type": "object",
+        "required": [
+          "webhookId",
+          "url",
+          "events",
+          "status",
+          "createdAt"
+        ],
+        "properties": {
+          "webhookId": {
+            "type": "string",
+            "pattern": "^whk_[A-Za-z0-9]{12,32}$"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventType"
+            }
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "SUSPENDED"
+            ]
+          },
+          "signingKeyId": {
+            "type": "string",
+            "description": "`kid` de `/jwks` con el que se firman las entregas."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ProblemDetail": {
+        "type": "object",
+        "description": "Error en formato RFC 9457.",
+        "required": [
+          "type",
+          "title",
+          "status"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "format": "uri",
+            "description": "URI del catálogo público de errores; cada entrada dice qué hacer.",
+            "examples": [
+              "https://developer.entidad-financiera.example/errors/no-autenticado"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string",
+            "description": "Explicación accionable, siempre libre de datos sensibles y de códigos internos del core."
+          },
+          "instance": {
+            "type": "string",
+            "description": "Referencia URI de la ocurrencia concreta del problema."
+          },
+          "traceId": {
+            "type": "string",
+            "description": "Identificador de traza para soporte (W3C Trace Context)."
+          },
+          "errors": {
+            "type": "array",
+            "description": "Detalle por campo en errores de validación.",
+            "items": {
+              "type": "object",
+              "required": [
+                "field",
+                "message"
+              ],
+              "properties": {
+                "field": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "examples": {
+      "openid-configuration": {
+        "summary": "Metadatos del servidor de autorización (sandbox)",
+        "value": {
+          "issuer": "https://auth.entidad-financiera.example",
+          "pushed_authorization_request_endpoint": "https://auth.entidad-financiera.example/par",
+          "require_pushed_authorization_requests": true,
+          "authorization_endpoint": "https://auth.entidad-financiera.example/authorize",
+          "token_endpoint": "https://auth.entidad-financiera.example/token",
+          "jwks_uri": "https://auth.entidad-financiera.example/jwks",
+          "registration_endpoint": "https://auth.entidad-financiera.example/register",
+          "backchannel_authentication_endpoint": "https://auth.entidad-financiera.example/bc-authorize",
+          "introspection_endpoint": "https://auth.entidad-financiera.example/introspect",
+          "revocation_endpoint": "https://auth.entidad-financiera.example/revoke",
+          "token_endpoint_auth_methods_supported": [
+            "private_key_jwt"
+          ],
+          "token_endpoint_auth_signing_alg_values_supported": [
+            "PS256",
+            "PS384",
+            "ES256"
+          ],
+          "code_challenge_methods_supported": [
+            "S256"
+          ],
+          "tls_client_certificate_bound_access_tokens": true,
+          "authorization_details_types_supported": [
+            "payment_consent"
+          ],
+          "scopes_supported": [
+            "connection:test",
+            "payment-methods:read",
+            "webhooks:manage",
+            "consents:write",
+            "consents:read",
+            "payments:initiate",
+            "payments:read",
+            "payments:capture",
+            "payments:cancel",
+            "refunds:write",
+            "refunds:read"
+          ],
+          "grant_types_supported": [
+            "client_credentials",
+            "authorization_code",
+            "urn:openid:params:grant-type:ciba",
+            "refresh_token"
+          ],
+          "authorization_response_iss_parameter_supported": true
+        }
+      },
+      "jwks": {
+        "summary": "Llaves públicas de la entidad",
+        "value": {
+          "keys": [
+            {
+              "kty": "RSA",
+              "kid": "entidad-2026-09",
+              "use": "sig",
+              "alg": "PS256",
+              "n": "sXchDaQebHnPiGvyDOAT4saGEUetSyo9MKLOoWFsueri23bOdgWp4Dy4WsJHK9V6uSPVKt3MSQ1pjIrgGdDlaX4Pe9w0nI9Mk8W2ZsnKmA5g5b0R3yEwVjbpVpOUYDl-K3wJnAmEQG5eL0V0lfVvW6KlSf9qiwNiskDi4-_2VLUoQzZLJIoYc5uk1JJtUfz1Q",
+              "e": "AQAB"
+            }
+          ]
+        }
+      },
+      "register-response": {
+        "summary": "Cliente registrado con los scopes aprobados en el alta",
+        "value": {
+          "client_id": "aliado-demo-001",
+          "client_id_issued_at": 1757548327,
+          "redirect_uris": [
+            "https://aliado.example/callback"
+          ],
+          "jwks_uri": "https://aliado.example/.well-known/jwks.json",
+          "token_endpoint_auth_method": "private_key_jwt",
+          "scope": "connection:test payment-methods:read webhooks:manage consents:write consents:read payments:initiate payments:read payments:capture payments:cancel refunds:write refunds:read",
+          "registration_client_uri": "https://auth.entidad-financiera.example/register/aliado-demo-001"
+        }
+      },
+      "error-sin-idempotency-key": {
+        "summary": "Falta el encabezado Idempotency-Key",
+        "value": {
+          "type": "https://developer.entidad-financiera.example/errors/idempotency-key-requerida",
+          "title": "Falta Idempotency-Key",
+          "status": 400,
+          "detail": "Toda operación que mueve dinero exige el encabezado Idempotency-Key (UUID). Sin él no hay forma segura de reintentar.",
+          "instance": "/payments",
+          "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+          "errors": [
+            {
+              "field": "Idempotency-Key",
+              "message": "Encabezado requerido, formato UUID"
+            }
+          ]
+        }
+      },
+      "error-token-sin-vinculo": {
+        "summary": "El token no corresponde al certificado de esta conexión",
+        "value": {
+          "type": "https://developer.entidad-financiera.example/errors/token-sin-vinculo",
+          "title": "El token no está vinculado a este certificado",
+          "status": 401,
+          "detail": "El claim cnf.x5t#S256 del token no coincide con la huella del certificado presentado en la conexión TLS. Solicita un token nuevo usando el mismo certificado con el que abres la conexión.",
+          "instance": "/connection-test",
+          "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
+        }
+      },
+      "par-response": {
+        "summary": "request_uri de un solo uso",
+        "value": {
+          "request_uri": "urn:ietf:params:oauth:request_uri:6esc_11ACC5bwc014ltc14eY22c",
+          "expires_in": 60
+        }
+      },
+      "ciba-response": {
+        "summary": "Solicitud entregada al titular en su app",
+        "value": {
+          "auth_req_id": "1c266114-a1be-4252-8ad1-04986c5b9ac1",
+          "expires_in": 120,
+          "interval": 5
+        }
+      },
+      "token-response": {
+        "summary": "Token vinculado al certificado, atado al consentimiento",
+        "value": {
+          "access_token": "eyJhbGciOiJQUzI1NiIsImtpZCI6ImVudGlkYWQtMjAyNi0wOSJ9.eyJpc3MiOiJodHRwczovL2F1dGguZW50aWRhZC1maW5hbmNpZXJhLmV4YW1wbGUiLCJzdWIiOiJhbGlhZG8tZGVtby0wMDEiLCJjbmYiOnsieDV0I1MyNTYiOiJTM1haMG9YazhfMnZHMVE5cjV3cTRiWms4WWwwbU43cFEyc1Q0dVY2d1g4In0sInNjb3BlIjoiY29uc2VudHM6cmVhZCBwYXltZW50czppbml0aWF0ZSBwYXltZW50czpyZWFkIiwiZXhwIjoxNzU3NTQ4OTI3fQ.firma-de-ejemplo",
+          "token_type": "Bearer",
+          "expires_in": 600,
+          "scope": "consents:read payments:initiate payments:read",
+          "authorization_details": [
+            {
+              "type": "payment_consent",
+              "consentId": "cns_7Kd9mQ2pLx4Rt8Vw",
+              "actions": [
+                "initiate",
+                "read"
+              ],
+              "instrumentType": "SAVINGS_ACCOUNT",
+              "amount": {
+                "amount": "150000.00",
+                "currency": "COP"
+              },
+              "creditorName": "Tienda Ejemplo S.A.S."
+            }
+          ]
+        }
+      },
+      "connection-test-ok": {
+        "summary": "Conexión válida en sandbox",
+        "value": {
+          "environment": "sandbox",
+          "clientId": "aliado-demo-001",
+          "certificateThumbprint": "S3XZ0oXk8_2vG1Q9r5wq4bZk8Yl0mN7pQ2sT4uV6wX8",
+          "tokenBoundToCertificate": true,
+          "effectiveScopes": [
+            "connection:test"
+          ],
+          "serverTime": "2026-09-10T14:32:07Z"
+        }
+      },
+      "consent-request-savings-single": {
+        "summary": "Cobro único contra cuenta de ahorros",
+        "value": {
+          "type": "SINGLE",
+          "instrumentType": "SAVINGS_ACCOUNT",
+          "amount": {
+            "amount": "150000.00",
+            "currency": "COP"
+          },
+          "creditor": {
+            "name": "Tienda Ejemplo S.A.S.",
+            "identification": {
+              "type": "NIT",
+              "number": "900123456-7"
+            },
+            "merchantCategoryCode": "5732"
+          },
+          "purpose": "Pago de la orden 48213 — suscripción anual",
+          "expiresAt": "2026-09-11T14:30:00Z",
+          "remittanceInformation": "TIENDA EJEMPLO ORDEN 48213",
+          "authorizationMode": "REDIRECT"
+        }
+      },
+      "consent-request-card-recurring": {
+        "summary": "Cobro mensual recurrente con tarjeta de crédito",
+        "value": {
+          "type": "RECURRING",
+          "instrumentType": "CREDIT_CARD",
+          "amount": {
+            "amount": "59900.00",
+            "currency": "COP"
+          },
+          "recurrence": {
+            "frequency": "MONTHLY",
+            "maxAmountPerPayment": {
+              "amount": "59900.00",
+              "currency": "COP"
+            },
+            "maxAmountPerPeriod": {
+              "amount": "59900.00",
+              "currency": "COP"
+            },
+            "validUntil": "2027-09-10"
+          },
+          "creditor": {
+            "name": "Tienda Ejemplo S.A.S.",
+            "identification": {
+              "type": "NIT",
+              "number": "900123456-7"
+            },
+            "merchantCategoryCode": "5732"
+          },
+          "purpose": "Suscripción mensual plan Premium",
+          "expiresAt": "2027-09-10T23:59:59Z",
+          "remittanceInformation": "TIENDA EJEMPLO PREMIUM",
+          "authorizationMode": "REDIRECT"
+        }
+      },
+      "consent-awaiting": {
+        "summary": "Pendiente de autorización del titular",
+        "value": {
+          "consentId": "cns_7Kd9mQ2pLx4Rt8Vw",
+          "type": "SINGLE",
+          "instrumentType": "SAVINGS_ACCOUNT",
+          "amount": {
+            "amount": "150000.00",
+            "currency": "COP"
+          },
+          "creditor": {
+            "name": "Tienda Ejemplo S.A.S.",
+            "identification": {
+              "type": "NIT",
+              "number": "900123456-7"
+            },
+            "merchantCategoryCode": "5732"
+          },
+          "thirdParty": {
+            "name": "Tienda Ejemplo S.A.S.",
+            "domicile": "Calle 100 # 8A-49, Bogotá D.C."
+          },
+          "purpose": "Pago de la orden 48213 — suscripción anual",
+          "expiresAt": "2026-09-11T14:30:00Z",
+          "remittanceInformation": "TIENDA EJEMPLO ORDEN 48213",
+          "authorization": {
+            "mode": "REDIRECT",
+            "authorizationDetails": {
+              "type": "payment_consent",
+              "consentId": "cns_7Kd9mQ2pLx4Rt8Vw",
+              "actions": [
+                "initiate",
+                "read"
+              ],
+              "instrumentType": "SAVINGS_ACCOUNT",
+              "amount": {
+                "amount": "150000.00",
+                "currency": "COP"
+              },
+              "creditorName": "Tienda Ejemplo S.A.S."
+            }
+          },
+          "createdAt": "2026-09-10T14:30:12Z",
+          "links": {
+            "self": "/payment-consents/cns_7Kd9mQ2pLx4Rt8Vw"
+          },
+          "status": "AWAITING_AUTHORISATION"
+        }
+      },
+      "error-monto-no-consentido": {
+        "summary": "El monto no coincide con el consentimiento atado al token",
+        "value": {
+          "type": "https://developer.entidad-financiera.example/errors/monto-no-consentido",
+          "title": "El monto no coincide con el consentimiento",
+          "status": 403,
+          "detail": "El consentimiento cns_7Kd9mQ2pLx4Rt8Vw autoriza exactamente 150000.00 COP; la petición pide 180000.00 COP. Crea un consentimiento nuevo por el monto correcto — un consentimiento no se puede ampliar.",
+          "instance": "/payments",
+          "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
+        }
+      },
+      "error-idempotency-key-reutilizada": {
+        "summary": "Misma Idempotency-Key con un cuerpo distinto",
+        "value": {
+          "type": "https://developer.entidad-financiera.example/errors/idempotency-key-reutilizada",
+          "title": "Idempotency-Key reutilizada con otro cuerpo",
+          "status": 422,
+          "detail": "La clave 0f8fad5b-d9cb-469f-a165-70867728950e ya se usó con un cuerpo diferente en las últimas 24 h. Si es una operación nueva, genera una clave nueva; si es un reintento, envía el cuerpo original.",
+          "instance": "/payments",
+          "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
+        }
+      },
+      "consent-authorised": {
+        "summary": "Autorizado — el titular eligió su producto",
+        "value": {
+          "consentId": "cns_7Kd9mQ2pLx4Rt8Vw",
+          "type": "SINGLE",
+          "instrumentType": "SAVINGS_ACCOUNT",
+          "amount": {
+            "amount": "150000.00",
+            "currency": "COP"
+          },
+          "creditor": {
+            "name": "Tienda Ejemplo S.A.S.",
+            "identification": {
+              "type": "NIT",
+              "number": "900123456-7"
+            },
+            "merchantCategoryCode": "5732"
+          },
+          "thirdParty": {
+            "name": "Tienda Ejemplo S.A.S.",
+            "domicile": "Calle 100 # 8A-49, Bogotá D.C."
+          },
+          "purpose": "Pago de la orden 48213 — suscripción anual",
+          "expiresAt": "2026-09-11T14:30:00Z",
+          "remittanceInformation": "TIENDA EJEMPLO ORDEN 48213",
+          "authorization": {
+            "mode": "REDIRECT",
+            "authorizationDetails": {
+              "type": "payment_consent",
+              "consentId": "cns_7Kd9mQ2pLx4Rt8Vw",
+              "actions": [
+                "initiate",
+                "read"
+              ],
+              "instrumentType": "SAVINGS_ACCOUNT",
+              "amount": {
+                "amount": "150000.00",
+                "currency": "COP"
+              },
+              "creditorName": "Tienda Ejemplo S.A.S."
+            }
+          },
+          "createdAt": "2026-09-10T14:30:12Z",
+          "links": {
+            "self": "/payment-consents/cns_7Kd9mQ2pLx4Rt8Vw"
+          },
+          "status": "AUTHORISED",
+          "instrument": {
+            "type": "SAVINGS_ACCOUNT",
+            "productReference": "prd_9Qz2Lm7Xw4Kd8Vn1",
+            "maskedNumber": "****4821"
+          },
+          "authorisedAt": "2026-09-10T14:31:48Z"
+        }
+      },
+      "payments-page": {
+        "summary": "Página de pagos liquidados",
+        "value": {
+          "items": [
+            {
+              "paymentId": "pay_3Hn8Zc1Qw7Lp5Ky2",
+              "consentId": "cns_7Kd9mQ2pLx4Rt8Vw",
+              "status": "SETTLED",
+              "instrument": {
+                "type": "SAVINGS_ACCOUNT",
+                "productReference": "prd_9Qz2Lm7Xw4Kd8Vn1",
+                "maskedNumber": "****4821"
+              },
+              "amount": {
+                "amount": "150000.00",
+                "currency": "COP"
+              },
+              "capturedAmount": {
+                "amount": "150000.00",
+                "currency": "COP"
+              },
+              "refundedAmount": {
+                "amount": "0.00",
+                "currency": "COP"
+              },
+              "creditor": {
+                "name": "Tienda Ejemplo S.A.S.",
+                "identification": {
+                  "type": "NIT",
+                  "number": "900123456-7"
+                },
+                "merchantCategoryCode": "5732"
+              },
+              "remittanceInformation": "TIENDA EJEMPLO ORDEN 48213",
+              "settlement": {
+                "rail": "ON_US",
+                "reference": "CORE-2026091014320745",
+                "settledAt": "2026-09-10T14:32:07Z"
+              },
+              "metadata": {
+                "orderId": "48213"
+              },
+              "createdAt": "2026-09-10T14:32:06Z",
+              "updatedAt": "2026-09-10T14:32:07Z",
+              "links": {
+                "self": "/payments/pay_3Hn8Zc1Qw7Lp5Ky2",
+                "consent": "/payment-consents/cns_7Kd9mQ2pLx4Rt8Vw",
+                "refunds": "/payments/pay_3Hn8Zc1Qw7Lp5Ky2/refunds"
+              }
+            }
+          ],
+          "nextCursor": null
+        }
+      },
+      "payment-request-savings": {
+        "summary": "Cobro contra cuenta de ahorros",
+        "value": {
+          "consentId": "cns_7Kd9mQ2pLx4Rt8Vw",
+          "amount": {
+            "amount": "150000.00",
+            "currency": "COP"
+          },
+          "metadata": {
+            "orderId": "48213"
+          }
+        }
+      },
+      "payment-request-card": {
+        "summary": "Autorización de tarjeta con captura manual, 3 cuotas",
+        "value": {
+          "consentId": "cns_2Bx6Wn9Qr4Tk7Mp1",
+          "amount": {
+            "amount": "890000.00",
+            "currency": "COP"
+          },
+          "installments": 3,
+          "captureMode": "MANUAL",
+          "metadata": {
+            "orderId": "48214"
+          }
+        }
+      },
+      "payment-savings-settled": {
+        "summary": "Débito ejecutado y liquidado de inmediato",
+        "value": {
+          "paymentId": "pay_3Hn8Zc1Qw7Lp5Ky2",
+          "consentId": "cns_7Kd9mQ2pLx4Rt8Vw",
+          "status": "SETTLED",
+          "instrument": {
+            "type": "SAVINGS_ACCOUNT",
+            "productReference": "prd_9Qz2Lm7Xw4Kd8Vn1",
+            "maskedNumber": "****4821"
+          },
+          "amount": {
+            "amount": "150000.00",
+            "currency": "COP"
+          },
+          "capturedAmount": {
+            "amount": "150000.00",
+            "currency": "COP"
+          },
+          "refundedAmount": {
+            "amount": "0.00",
+            "currency": "COP"
+          },
+          "creditor": {
+            "name": "Tienda Ejemplo S.A.S.",
+            "identification": {
+              "type": "NIT",
+              "number": "900123456-7"
+            },
+            "merchantCategoryCode": "5732"
+          },
+          "remittanceInformation": "TIENDA EJEMPLO ORDEN 48213",
+          "settlement": {
+            "rail": "ON_US",
+            "reference": "CORE-2026091014320745",
+            "settledAt": "2026-09-10T14:32:07Z"
+          },
+          "metadata": {
+            "orderId": "48213"
+          },
+          "createdAt": "2026-09-10T14:32:06Z",
+          "updatedAt": "2026-09-10T14:32:07Z",
+          "links": {
+            "self": "/payments/pay_3Hn8Zc1Qw7Lp5Ky2",
+            "consent": "/payment-consents/cns_7Kd9mQ2pLx4Rt8Vw",
+            "refunds": "/payments/pay_3Hn8Zc1Qw7Lp5Ky2/refunds"
+          }
+        }
+      },
+      "payment-card-authorized": {
+        "summary": "Tarjeta autorizada, cupo retenido, pendiente de captura",
+        "value": {
+          "paymentId": "pay_8Wq2Nv5Tb9Xk4Jm7",
+          "consentId": "cns_2Bx6Wn9Qr4Tk7Mp1",
+          "status": "AUTHORIZED",
+          "instrument": {
+            "type": "CREDIT_CARD",
+            "productReference": "prd_4Vb7Nk2Qw9Xt5Lm8",
+            "maskedNumber": "****7730",
+            "brand": "VISA"
+          },
+          "amount": {
+            "amount": "890000.00",
+            "currency": "COP"
+          },
+          "capturedAmount": {
+            "amount": "0.00",
+            "currency": "COP"
+          },
+          "refundedAmount": {
+            "amount": "0.00",
+            "currency": "COP"
+          },
+          "creditor": {
+            "name": "Tienda Ejemplo S.A.S.",
+            "identification": {
+              "type": "NIT",
+              "number": "900123456-7"
+            },
+            "merchantCategoryCode": "5732"
+          },
+          "remittanceInformation": "TIENDA EJEMPLO ORDEN 48214",
+          "installments": 3,
+          "captureMode": "MANUAL",
+          "authorizationExpiresAt": "2026-09-17T15:02:41Z",
+          "metadata": {
+            "orderId": "48214"
+          },
+          "createdAt": "2026-09-10T15:02:41Z",
+          "updatedAt": "2026-09-10T15:02:41Z",
+          "links": {
+            "self": "/payments/pay_8Wq2Nv5Tb9Xk4Jm7",
+            "consent": "/payment-consents/cns_2Bx6Wn9Qr4Tk7Mp1",
+            "captures": "/payments/pay_8Wq2Nv5Tb9Xk4Jm7/captures",
+            "refunds": "/payments/pay_8Wq2Nv5Tb9Xk4Jm7/refunds"
+          }
+        }
+      },
+      "payment-pending-core-timeout": {
+        "summary": "El core no respondió a tiempo: el pago existe y se resolverá por consulta de referencia",
+        "value": {
+          "paymentId": "pay_5Pz1Rk8Md3Qy6Hc9",
+          "consentId": "cns_7Kd9mQ2pLx4Rt8Vw",
+          "status": "PENDING",
+          "statusReason": {
+            "code": "CORE_TIMEOUT",
+            "message": "La orden se envió al core y aún no hay confirmación. Consulta GET /payments/{paymentId} o espera el evento payment.settled / payment.rejected. No reintentes el POST."
+          },
+          "instrument": {
+            "type": "SAVINGS_ACCOUNT",
+            "productReference": "prd_9Qz2Lm7Xw4Kd8Vn1",
+            "maskedNumber": "****4821"
+          },
+          "amount": {
+            "amount": "150000.00",
+            "currency": "COP"
+          },
+          "capturedAmount": {
+            "amount": "0.00",
+            "currency": "COP"
+          },
+          "refundedAmount": {
+            "amount": "0.00",
+            "currency": "COP"
+          },
+          "creditor": {
+            "name": "Tienda Ejemplo S.A.S.",
+            "identification": {
+              "type": "NIT",
+              "number": "900123456-7"
+            },
+            "merchantCategoryCode": "5732"
+          },
+          "remittanceInformation": "TIENDA EJEMPLO ORDEN 48213",
+          "metadata": {
+            "orderId": "48213"
+          },
+          "createdAt": "2026-09-10T14:32:06Z",
+          "updatedAt": "2026-09-10T14:32:09Z",
+          "links": {
+            "self": "/payments/pay_5Pz1Rk8Md3Qy6Hc9",
+            "consent": "/payment-consents/cns_7Kd9mQ2pLx4Rt8Vw"
+          }
+        }
+      },
+      "error-estado-invalido": {
+        "summary": "Transición inválida para el estado actual",
+        "value": {
+          "type": "https://developer.entidad-financiera.example/errors/transicion-invalida",
+          "title": "El pago no admite esta operación en su estado actual",
+          "status": 409,
+          "detail": "El pago pay_8Wq2Nv5Tb9Xk4Jm7 está en CANCELLED y no puede capturarse. Consulta GET /payments/{paymentId} para ver el estado vigente.",
+          "instance": "/payments/pay_8Wq2Nv5Tb9Xk4Jm7/captures",
+          "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
+        }
+      },
+      "error-core-no-disponible": {
+        "summary": "El core no está disponible; la orden no se envió",
+        "value": {
+          "type": "https://developer.entidad-financiera.example/errors/core-no-disponible",
+          "title": "El core transaccional no está disponible",
+          "status": 503,
+          "detail": "El circuito hacia el core está abierto y la orden NO se envió. Es seguro reintentar tras el tiempo indicado en Retry-After con la misma Idempotency-Key.",
+          "instance": "/payments",
+          "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
+        }
+      },
+      "captures-list": {
+        "summary": "Capturas de un pago",
+        "value": {
+          "items": [
+            {
+              "captureId": "cap_2Lq7Vx4Nw9Tb1Ks8",
+              "paymentId": "pay_8Wq2Nv5Tb9Xk4Jm7",
+              "amount": {
+                "amount": "500000.00",
+                "currency": "COP"
+              },
+              "status": "PROCESSED",
+              "createdAt": "2026-09-11T09:15:22Z"
+            }
+          ]
+        }
+      },
+      "capture-request-partial": {
+        "summary": "Captura parcial al despachar el primer artículo",
+        "value": {
+          "amount": {
+            "amount": "500000.00",
+            "currency": "COP"
+          },
+          "remittanceInformation": "TIENDA EJEMPLO ORDEN 48214 ENVIO 1/2"
+        }
+      },
+      "capture-partial": {
+        "summary": "Captura procesada",
+        "value": {
+          "captureId": "cap_2Lq7Vx4Nw9Tb1Ks8",
+          "paymentId": "pay_8Wq2Nv5Tb9Xk4Jm7",
+          "amount": {
+            "amount": "500000.00",
+            "currency": "COP"
+          },
+          "status": "PROCESSED",
+          "createdAt": "2026-09-11T09:15:22Z"
+        }
+      },
+      "cancellation": {
+        "summary": "Autorización anulada, cupo liberado",
+        "value": {
+          "cancellationId": "cnl_7Xk3Qw9Nt2Vb5Lm8",
+          "paymentId": "pay_8Wq2Nv5Tb9Xk4Jm7",
+          "status": "PROCESSED",
+          "reason": "ORDER_CANCELLED",
+          "createdAt": "2026-09-11T10:02:15Z"
+        }
+      },
+      "refund-request": {
+        "summary": "Devolución parcial por artículo no entregado",
+        "value": {
+          "amount": {
+            "amount": "50000.00",
+            "currency": "COP"
+          },
+          "reason": "PRODUCT_NOT_DELIVERED",
+          "remittanceInformation": "DEVOLUCION ORDEN 48213"
+        }
+      },
+      "refund": {
+        "summary": "Devolución aceptada, en proceso",
+        "value": {
+          "refundId": "rfd_6Ym3Kd8Qp2Wx5Zn1",
+          "paymentId": "pay_3Hn8Zc1Qw7Lp5Ky2",
+          "amount": {
+            "amount": "50000.00",
+            "currency": "COP"
+          },
+          "status": "PROCESSED",
+          "reason": "PRODUCT_NOT_DELIVERED",
+          "settlement": {
+            "rail": "ON_US",
+            "reference": "CORE-2026091209440212",
+            "settledAt": "2026-09-12T09:44:02Z"
+          },
+          "createdAt": "2026-09-12T09:44:01Z",
+          "links": {
+            "self": "/payments/pay_3Hn8Zc1Qw7Lp5Ky2/refunds/rfd_6Ym3Kd8Qp2Wx5Zn1",
+            "payment": "/payments/pay_3Hn8Zc1Qw7Lp5Ky2"
+          }
+        }
+      },
+      "payment-methods": {
+        "summary": "Instrumentos habilitados para el aliado (sandbox)",
+        "value": {
+          "items": [
+            {
+              "instrumentType": "SAVINGS_ACCOUNT",
+              "enabled": true,
+              "currency": "COP",
+              "limits": {
+                "minAmount": {
+                  "amount": "1000.00",
+                  "currency": "COP"
+                },
+                "maxAmountPerPayment": {
+                  "amount": "20000000.00",
+                  "currency": "COP"
+                },
+                "maxAmountPerDay": {
+                  "amount": "50000000.00",
+                  "currency": "COP"
+                }
+              },
+              "features": {
+                "recurring": true,
+                "partialCapture": false,
+                "partialRefund": true,
+                "installments": false,
+                "decoupledAuthorization": true
+              },
+              "settlementWindow": "Inmediata"
+            },
+            {
+              "instrumentType": "CREDIT_CARD",
+              "enabled": true,
+              "currency": "COP",
+              "limits": {
+                "minAmount": {
+                  "amount": "5000.00",
+                  "currency": "COP"
+                },
+                "maxAmountPerPayment": {
+                  "amount": "30000000.00",
+                  "currency": "COP"
+                },
+                "maxAmountPerDay": {
+                  "amount": "60000000.00",
+                  "currency": "COP"
+                }
+              },
+              "features": {
+                "recurring": true,
+                "partialCapture": true,
+                "partialRefund": true,
+                "installments": true,
+                "decoupledAuthorization": true
+              },
+              "settlementWindow": "Captura inmediata; liquidación al comercio según ciclo de adquirencia"
+            }
+          ]
+        }
+      },
+      "webhooks-list": {
+        "summary": "Suscripciones del aliado",
+        "value": {
+          "items": [
+            {
+              "webhookId": "whk_5Nq8Tk2Xw7Lb4Vm9",
+              "url": "https://aliado.example/webhooks/pagos",
+              "events": [
+                "payment.settled",
+                "payment.rejected",
+                "consent.revoked"
+              ],
+              "status": "ACTIVE",
+              "signingKeyId": "entidad-2026-09",
+              "createdAt": "2026-09-10T14:00:00Z"
+            }
+          ]
+        }
+      },
+      "webhook": {
+        "summary": "Suscripción activa",
+        "value": {
+          "webhookId": "whk_5Nq8Tk2Xw7Lb4Vm9",
+          "url": "https://aliado.example/webhooks/pagos",
+          "events": [
+            "payment.settled",
+            "payment.rejected",
+            "consent.revoked"
+          ],
+          "status": "ACTIVE",
+          "signingKeyId": "entidad-2026-09",
+          "createdAt": "2026-09-10T14:00:00Z"
+        }
+      },
+      "events-page": {
+        "summary": "Página del feed de eventos",
+        "value": {
+          "items": [
+            {
+              "eventId": "evt_4Tb8Kx2Qw6Ln9Pd3",
+              "type": "consent.authorised",
+              "occurredAt": "2026-09-10T14:31:48Z",
+              "resource": {
+                "type": "consent",
+                "id": "cns_7Kd9mQ2pLx4Rt8Vw",
+                "href": "/payment-consents/cns_7Kd9mQ2pLx4Rt8Vw"
+              },
+              "data": {
+                "status": "AUTHORISED"
+              }
+            },
+            {
+              "eventId": "evt_9Rn2Vp7Kx4Wt1Qm6",
+              "type": "payment.settled",
+              "occurredAt": "2026-09-10T14:32:07Z",
+              "resource": {
+                "type": "payment",
+                "id": "pay_3Hn8Zc1Qw7Lp5Ky2",
+                "href": "/payments/pay_3Hn8Zc1Qw7Lp5Ky2"
+              },
+              "data": {
+                "status": "SETTLED",
+                "amount": {
+                  "amount": "150000.00",
+                  "currency": "COP"
+                }
+              }
+            }
+          ],
+          "nextCursor": null
+        }
+      }
+    }
+  }
+}

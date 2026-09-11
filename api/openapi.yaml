@@ -99,7 +99,7 @@ paths:
       description: |
         OpenID Discovery / RFC 8414. Publica las URL de `/par`, `/token`, `/bc-authorize`,
         `/jwks` y `/register`, los métodos de autenticación de cliente admitidos
-        (`private_key_jwt`, `tls_client_auth`), los algoritmos (PS256 o superior — HS256 se
+        (`private_key_jwt`), los algoritmos (PS256 o superior — HS256 se
         rechaza), los scopes soportados y `require_pushed_authorization_requests: true`.
         El aliado configura **una sola URL** y descubre el resto.
       security: []
@@ -154,6 +154,11 @@ paths:
         debida diligencia del alta) con su `jwks_uri`, sus `redirect_uris` y los scopes que
         solicita. La entidad valida la firma, cruza el certificado de transporte con el
         registro y devuelve el `client_id`. Sustituye el alta manual por correo.
+
+        El *Software Statement* debe traer la huella (`x5t#S256`) del certificado de transporte
+        autorizado en el alta, `exp` corto y `jti` de un solo uso; el servidor **compara esa
+        huella con el certificado de la conexión** antes de emitir el `client_id`. Un SSA
+        filtrado no sirve con otro certificado.
       security:
         - mutualTLS: []
       requestBody:
@@ -186,7 +191,7 @@ paths:
       summary: Pushed Authorization Request (PAR)
       description: |
         RFC 9126 — **obligatorio en FAPI 2.0**. El aliado envía por el canal posterior,
-        autenticado como cliente (`private_key_jwt` o mTLS), los parámetros de la
+        autenticado como cliente con `private_key_jwt`, los parámetros de la
         autorización: `scope`, `authorization_details` (RAR, RFC 9396) con el consentimiento
         exacto, `code_challenge` (PKCE S256) y `redirect_uri`. Recibe un `request_uri` de un
         solo uso con el que redirige al titular a `/authorize`. Nada sensible viaja por el
@@ -213,6 +218,8 @@ paths:
           $ref: "#/components/responses/ErrorOAuth"
         "401":
           $ref: "#/components/responses/ErrorOAuth"
+        "429":
+          $ref: "#/components/responses/LimiteExcedido"
 
   /bc-authorize:
     servers:
@@ -249,6 +256,8 @@ paths:
           $ref: "#/components/responses/ErrorOAuth"
         "401":
           $ref: "#/components/responses/ErrorOAuth"
+        "429":
+          $ref: "#/components/responses/LimiteExcedido"
 
   /token:
     servers:
@@ -265,10 +274,10 @@ paths:
         | `client_credentials` | Operaciones **sin titular**: métodos de pago, webhooks, prueba de conexión | `payment-methods:read`, `webhooks:manage`, `connection:test` |
         | `authorization_code` (+ PKCE, desde PAR) | Todo lo que **mueve dinero o toca datos del titular** | `consents:*`, `payments:*`, `refunds:*` |
         | `urn:openid:params:grant-type:ciba` | Igual que el anterior, en flujo desacoplado | Ídem |
-        | `refresh_token` | Consentimientos `RECURRING` | Los del consentimiento |
+        | `refresh_token` | Consentimientos `RECURRING`; **rotación en cada uso** (el anterior se invalida) y vinculado al certificado | Los del consentimiento |
 
         Rechazados: `password` y cualquier cliente público. El token es un **JWT firmado con
-        PS256 o superior**, **vinculado al certificado** del cliente (`cnf.x5t#S256`, RFC 8705)
+        PS256 o superior**, **vinculado al certificado** de la conexión mTLS (`cnf.x5t#S256`, RFC 8705; el vínculo no depende del método de autenticación)
         y con vida corta. Contiene los `authorization_details` autorizados: el token queda
         atado al monto, beneficiario y producto del consentimiento — no a "pagos en general".
       security:
@@ -293,6 +302,8 @@ paths:
           $ref: "#/components/responses/ErrorOAuth"
         "401":
           $ref: "#/components/responses/ErrorOAuth"
+        "429":
+          $ref: "#/components/responses/LimiteExcedido"
 
   /connection-test:
     get:
@@ -878,6 +889,11 @@ paths:
         compartidos: el aliado verifica con la llave pública. Reintentos con retroceso
         exponencial durante 24 h; después, la suscripción pasa a `SUSPENDED` y se emite el
         evento `webhook.suspended` al feed.
+
+        **Destinos permitidos (contra SSRF):** el nombre se resuelve al registrar **y en cada
+        entrega**; se rechazan rangos privados, *loopback*, *link-local* y metadatos de nube;
+        no se siguen redirecciones; las entregas salen por un egreso sin ruta a la red interna;
+        de la respuesta solo se lee el código de estado.
       security:
         - mutualTLS: []
           oauth2: ["webhooks:manage"]
@@ -970,6 +986,10 @@ paths:
         Todo evento entregado por webhook también está aquí, en orden, durante 30 días. Es el
         mecanismo de **recuperación**: un aliado que estuvo caído lee desde su último cursor
         y queda al día sin pedir reenvíos.
+
+        El feed se **filtra por los scopes del token**: `consent.*` solo con `consents:read`,
+        `refund.*` solo con `refunds:read`, `payment.*` con `payments:read`. Un token de
+        conciliación no ve más de lo que vería consultando los recursos.
       security:
         - mutualTLS: []
           oauth2: ["payments:read"]
@@ -1047,7 +1067,7 @@ components:
       description: |
         OAuth 2.0 bajo el perfil **FAPI 2.0 Security Profile**: PAR obligatorio, PKCE S256,
         tokens **vinculados al certificado** del cliente (RFC 8705, claim `cnf.x5t#S256`),
-        autenticación de cliente con `private_key_jwt` (PS256 o superior) o mTLS, `code` con
+        autenticación de cliente con `private_key_jwt` (PS256 o superior), `code` con
         vida ≤ 60 s, `iss` en la respuesta de autorización (RFC 9207). El token va **solo** en
         el encabezado `Authorization`; nunca en la URL.
 
@@ -1086,6 +1106,9 @@ components:
         cuerpo dentro de 24 h → se devuelve la respuesta original con
         `Idempotency-Replayed: true` y **sin** volver a llamar al core. Misma clave + cuerpo
         distinto → `422`. Sin clave → `400`. Es la única forma segura de reintentar.
+
+        La clave se interpreta **dentro del ámbito del `client_id`**: dos aliados con la misma
+        clave son dos operaciones independientes; nunca se sirve la respuesta de otro.
       schema:
         type: string
         format: uuid
@@ -1103,7 +1126,7 @@ components:
       name: Signature-Input
       in: header
       required: true
-      description: RFC 9421. Componentes cubiertos por la firma (`@method`, `@target-uri`, `content-digest`, `idempotency-key`, `created`, `keyid`).
+      description: RFC 9421. Componentes cubiertos por la firma (`@method`, `@target-uri`, `content-digest`, `idempotency-key`, `created`, `keyid`). `created` debe estar a ≤ 5 min del reloj del servidor; fuera de esa ventana la firma se rechaza aunque sea válida.
       schema: { type: string }
       example: 'sig1=("@method" "@target-uri" "content-digest" "idempotency-key");created=1757548327;keyid="aliado-demo-001-2026"'
     Signature:
@@ -1285,36 +1308,92 @@ components:
         - scopes_supported
         - grant_types_supported
       properties:
-        issuer: { type: string, format: uri }
-        pushed_authorization_request_endpoint: { type: string, format: uri }
-        require_pushed_authorization_requests: { type: boolean, const: true }
-        authorization_endpoint: { type: string, format: uri }
-        token_endpoint: { type: string, format: uri }
-        jwks_uri: { type: string, format: uri }
-        registration_endpoint: { type: string, format: uri }
-        backchannel_authentication_endpoint: { type: string, format: uri }
-        introspection_endpoint: { type: string, format: uri }
-        revocation_endpoint: { type: string, format: uri }
+        issuer:
+          type: string
+          format: uri
+          description: Identidad del servidor. Todo token que emita lleva `iss` igual a este valor.
+          examples: ["https://auth.entidad-financiera.example"]
+        pushed_authorization_request_endpoint:
+          type: string
+          format: uri
+          description: Donde el aliado envía la solicitud de autorización por el canal posterior (PAR).
+          examples: ["https://auth.entidad-financiera.example/par"]
+        require_pushed_authorization_requests:
+          type: boolean
+          const: true
+          description: Siempre `true` — sin PAR no hay autorización (FAPI 2.0).
+        authorization_endpoint:
+          type: string
+          format: uri
+          description: A donde se redirige al titular para autenticarse y confirmar.
+          examples: ["https://auth.entidad-financiera.example/authorize"]
+        token_endpoint:
+          type: string
+          format: uri
+          description: Donde se obtienen y renuevan los tokens.
+          examples: ["https://auth.entidad-financiera.example/token"]
+        jwks_uri:
+          type: string
+          format: uri
+          description: Llaves públicas de la entidad para verificar tokens y firmas de webhooks.
+          examples: ["https://auth.entidad-financiera.example/jwks"]
+        registration_endpoint:
+          type: string
+          format: uri
+          description: Alta del aliado como cliente OAuth (registro dinámico).
+          examples: ["https://auth.entidad-financiera.example/register"]
+        backchannel_authentication_endpoint:
+          type: string
+          format: uri
+          description: Autorización desacoplada (CIBA) para cobros en punto de venta o call center.
+          examples: ["https://auth.entidad-financiera.example/bc-authorize"]
+        introspection_endpoint:
+          type: string
+          format: uri
+          description: Consulta si un token sigue vigente.
+          examples: ["https://auth.entidad-financiera.example/introspect"]
+        revocation_endpoint:
+          type: string
+          format: uri
+          description: Anula un token antes de su vencimiento.
+          examples: ["https://auth.entidad-financiera.example/revoke"]
         token_endpoint_auth_methods_supported:
           type: array
-          items: { type: string, enum: [private_key_jwt, tls_client_auth] }
+          description: "Cómo se identifica el aliado ante `/token`. Solo `private_key_jwt`, el método que nombra la CE 004/2024 (3.2.3 b); mTLS sigue siendo el canal y el ancla del token, no el método de autenticación. Nunca `client_secret_*`."
+          items: { type: string, enum: [private_key_jwt] }
+          examples: [["private_key_jwt"]]
         token_endpoint_auth_signing_alg_values_supported:
           type: array
+          description: Algoritmos admitidos para firmar el `client_assertion`. HS256 y RS256 se rechazan.
           items: { type: string, enum: [PS256, PS384, PS512, ES256, ES384] }
+          examples: [["PS256", "PS384", "ES256"]]
         code_challenge_methods_supported:
           type: array
+          description: PKCE obligatorio, solo S256.
           items: { type: string, const: S256 }
-        tls_client_certificate_bound_access_tokens: { type: boolean, const: true }
+          examples: [["S256"]]
+        tls_client_certificate_bound_access_tokens:
+          type: boolean
+          const: true
+          description: Siempre `true` — los tokens van atados al certificado del aliado (RFC 8705).
         authorization_details_types_supported:
           type: array
+          description: Tipos de consentimiento que el servidor entiende en `authorization_details` (RFC 9396).
           items: { type: string }
+          examples: [["payment_consent"]]
         scopes_supported:
           type: array
+          description: Catálogo cerrado de scopes. Cuáles se conceden a cada aliado se decide en el alta.
           items: { type: string }
+          examples: [["connection:test", "payment-methods:read", "webhooks:manage", "consents:write", "consents:read", "payments:initiate", "payments:read", "payments:capture", "payments:cancel", "refunds:write", "refunds:read"]]
         grant_types_supported:
           type: array
           items: { type: string }
-        authorization_response_iss_parameter_supported: { type: boolean }
+          examples: [["client_credentials", "authorization_code", "urn:openid:params:grant-type:ciba", "refresh_token"]]
+        authorization_response_iss_parameter_supported:
+          type: boolean
+          description: El servidor incluye `iss` en cada respuesta de autorización (RFC 9207), contra ataques de confusión de emisor.
+          examples: [true]
 
     JwkSet:
       type: object
@@ -1326,12 +1405,12 @@ components:
             type: object
             required: [kty, kid, use, alg]
             properties:
-              kty: { type: string, enum: [RSA, EC] }
-              kid: { type: string }
+              kty: { type: string, enum: [RSA, EC], examples: [RSA] }
+              kid: { type: string, description: "Identificador de la llave; cada token y cada webhook dicen con cuál se firmaron.", examples: [entidad-2026-09] }
               use: { type: string, enum: [sig] }
-              alg: { type: string, enum: [PS256, PS384, PS512, ES256, ES384] }
-              n: { type: string }
-              e: { type: string }
+              alg: { type: string, enum: [PS256, PS384, PS512, ES256, ES384], examples: [PS256] }
+              n: { type: string, description: "Módulo RSA en base64url.", examples: [sXchDaQebHnPiGvyDOAT4saGEUetSyo9MKLOoWFsueri23bOdgWp4Dy4WsJHK9V6uSPVKt3MSQ1pjIrgGdDlaX4Pe9w0nI9Mk8W2ZsnKmA5g5b0R3yEwVjbpVpOUYDl-K3wJnAmEQG5eL0V0lfVvW6KlSf9qiwNiskDi4-_2VLUoQzZLJIoYc5uk1JJtUfz1Q] }
+              e: { type: string, examples: [AQAB] }
               crv: { type: string }
               x: { type: string }
               y: { type: string }
@@ -1346,21 +1425,27 @@ components:
       properties:
         software_statement:
           type: string
-          description: JWT firmado por el directorio (o por la entidad durante el alta) que identifica al aliado y sus capacidades.
+          description: JWT firmado por el directorio (o por la entidad durante el alta) que identifica al aliado y sus capacidades. Incluye `x5t#S256` del certificado autorizado, `exp` corto y `jti` de un solo uso.
+          examples: ["eyJhbGciOiJQUzI1NiIsImtpZCI6ImVudGlkYWQtMjAyNi0wOSJ9.eyJpc3MiOiJodHRwczovL2F1dGguZW50aWRhZC1maW5hbmNpZXJhLmV4YW1wbGUiLCJzb2Z0d2FyZV9pZCI6ImFsaWFkby1kZW1vLTAwMSIsInNvZnR3YXJlX2NsaWVudF9uYW1lIjoiVGllbmRhIEVqZW1wbG8gUy5BLlMuIiwieDV0I1MyNTYiOiJTM1haMG9YazhfMnZHMVE5cjV3cTRiWms4WWwwbU43cFEyc1Q0dVY2d1g4IiwianRpIjoiN2Y0YjJjOWUiLCJleHAiOjE3NTc1NTAxMjd9.firma-de-ejemplo"]
         redirect_uris:
           type: array
           minItems: 1
-          items: { type: string, format: uri }
+          description: Solo `https`, sin comodines ni fragmentos; coincidencia exacta en la autorización. `localhost` solo se admite en sandbox.
+          items: { type: string, format: uri, pattern: "^https://[^#*]+$" }
+          examples: [["https://aliado.example/callback"]]
         jwks_uri:
           type: string
           format: uri
           description: Donde el aliado publica sus llaves públicas (para `private_key_jwt` y firma de mensajes).
+          examples: ["https://aliado.example/.well-known/jwks.json"]
         token_endpoint_auth_method:
           type: string
-          enum: [private_key_jwt, tls_client_auth]
+          enum: [private_key_jwt]
+          examples: [private_key_jwt]
         scope:
           type: string
           description: Scopes solicitados, separados por espacio. Se conceden solo los aprobados en el alta.
+          examples: ["connection:test payment-methods:read webhooks:manage consents:write consents:read payments:initiate payments:read"]
         backchannel_token_delivery_mode:
           type: string
           enum: [poll, ping]
@@ -1372,35 +1457,38 @@ components:
       type: object
       required: [client_id, client_id_issued_at, redirect_uris, jwks_uri, token_endpoint_auth_method, scope]
       properties:
-        client_id: { type: string }
-        client_id_issued_at: { type: integer }
+        client_id: { type: string, description: "El identificador del aliado; va en cada PAR y en cada `client_assertion`.", examples: [aliado-demo-001] }
+        client_id_issued_at: { type: integer, description: "Instante de emisión (epoch, segundos).", examples: [1757548327] }
         redirect_uris:
           type: array
           items: { type: string, format: uri }
-        jwks_uri: { type: string, format: uri }
-        token_endpoint_auth_method: { type: string }
-        scope: { type: string, description: Scopes efectivamente concedidos. }
-        registration_client_uri: { type: string, format: uri }
+          examples: [["https://aliado.example/callback"]]
+        jwks_uri: { type: string, format: uri, examples: ["https://aliado.example/.well-known/jwks.json"] }
+        token_endpoint_auth_method: { type: string, examples: [private_key_jwt] }
+        scope: { type: string, description: "Scopes efectivamente concedidos — pueden ser menos que los solicitados.", examples: ["connection:test payment-methods:read consents:write consents:read payments:initiate payments:read"] }
+        registration_client_uri: { type: string, format: uri, description: "Donde consultar o actualizar este registro (RFC 7592).", examples: ["https://auth.entidad-financiera.example/register/aliado-demo-001"] }
 
     ParRequest:
       type: object
       required: [client_id, response_type, redirect_uri, scope, code_challenge, code_challenge_method, authorization_details]
       properties:
-        client_id: { type: string }
+        client_id: { type: string, examples: [aliado-demo-001] }
         response_type: { type: string, const: code }
-        redirect_uri: { type: string, format: uri }
+        redirect_uri: { type: string, format: uri, description: "Debe coincidir exactamente con una registrada.", examples: ["https://aliado.example/callback"] }
         scope: { type: string, examples: ["consents:read payments:initiate payments:read"] }
-        code_challenge: { type: string }
+        code_challenge: { type: string, description: "SHA-256 en base64url del `code_verifier` que el aliado guardó (PKCE).", examples: [E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM] }
         code_challenge_method: { type: string, const: S256 }
         authorization_details:
           type: string
           description: JSON serializado de un arreglo de `AuthorizationDetail` (RFC 9396) con el consentimiento exacto.
+          examples: ['[{"type":"payment_consent","consentId":"cns_7Kd9mQ2pLx4Rt8Vw","actions":["initiate","read"],"instrumentType":"SAVINGS_ACCOUNT","amount":{"amount":"150000.00","currency":"COP"},"creditorName":"Tienda Ejemplo S.A.S."}]']
         client_assertion_type:
           type: string
           const: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
         client_assertion:
           type: string
           description: JWT `private_key_jwt` firmado con PS256+, `aud` = issuer exacto del servidor.
+          examples: ["eyJhbGciOiJQUzI1NiIsImtpZCI6ImFsaWFkby1kZW1vLTAwMS0yMDI2In0.eyJpc3MiOiJhbGlhZG8tZGVtby0wMDEiLCJzdWIiOiJhbGlhZG8tZGVtby0wMDEiLCJhdWQiOiJodHRwczovL2F1dGguZW50aWRhZC1maW5hbmNpZXJhLmV4YW1wbGUiLCJqdGkiOiI5YzJlNGY3YSIsImV4cCI6MTc1NzU0ODM4N30.firma-del-aliado"]
 
     ParResponse:
       type: object
@@ -1409,19 +1497,22 @@ components:
         request_uri:
           type: string
           description: Referencia de un solo uso para `/authorize?client_id=…&request_uri=…`.
+          examples: ["urn:ietf:params:oauth:request_uri:6esc_11ACC5bwc014ltc14eY22c"]
         expires_in:
           type: integer
           description: Segundos de validez (≤ 60).
+          examples: [60]
 
     CibaRequest:
       type: object
       required: [client_id, scope, login_hint, authorization_details, binding_message]
       properties:
-        client_id: { type: string }
-        scope: { type: string }
+        client_id: { type: string, examples: [aliado-demo-001] }
+        scope: { type: string, examples: ["consents:read payments:initiate payments:read"] }
         login_hint:
           type: string
           description: Identificador del titular que la entidad ya conoce. Nunca credenciales.
+          examples: ["CC:1032456789"]
         authorization_details:
           type: string
           description: JSON serializado con el consentimiento exacto (RFC 9396).
@@ -1429,9 +1520,11 @@ components:
           type: string
           maxLength: 20
           description: Código corto que se muestra en el punto de venta y en la app del titular para que verifique que autoriza *esa* operación.
+          examples: [K7P2]
         requested_expiry:
           type: integer
           description: Segundos que el titular tiene para responder.
+          examples: [120]
         client_assertion_type:
           type: string
         client_assertion:
@@ -1441,11 +1534,12 @@ components:
       type: object
       required: [auth_req_id, expires_in]
       properties:
-        auth_req_id: { type: string }
-        expires_in: { type: integer }
+        auth_req_id: { type: string, examples: [1c266114-a1be-4252-8ad1-04986c5b9ac1] }
+        expires_in: { type: integer, examples: [120] }
         interval:
           type: integer
           description: Segundos mínimos entre consultas a `/token` en modo *poll*.
+          examples: [5]
 
     TokenRequest:
       type: object
@@ -1458,15 +1552,15 @@ components:
             - authorization_code
             - "urn:openid:params:grant-type:ciba"
             - refresh_token
-        code: { type: string }
-        code_verifier: { type: string }
-        redirect_uri: { type: string, format: uri }
-        auth_req_id: { type: string }
-        refresh_token: { type: string }
-        scope: { type: string }
-        client_id: { type: string }
-        client_assertion_type: { type: string }
-        client_assertion: { type: string }
+        code: { type: string, description: "El código recibido en la redirección (vida ≤ 60 s, un solo uso).", examples: [SplxlOBeZQQYbYS6WxSbIA] }
+        code_verifier: { type: string, description: "El secreto PKCE original; el servidor lo hashea y compara con el `code_challenge` del PAR.", examples: [dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk] }
+        redirect_uri: { type: string, format: uri, examples: ["https://aliado.example/callback"] }
+        auth_req_id: { type: string, description: "Solo grant CIBA.", examples: [1c266114-a1be-4252-8ad1-04986c5b9ac1] }
+        refresh_token: { type: string, description: "Solo grant `refresh_token`; rota en cada uso."}
+        scope: { type: string, examples: ["connection:test"] }
+        client_id: { type: string, examples: [aliado-demo-001] }
+        client_assertion_type: { type: string, examples: ["urn:ietf:params:oauth:client-assertion-type:jwt-bearer"] }
+        client_assertion: { type: string, description: "JWT firmado con la llave privada del aliado (PS256+)."}
 
     TokenResponse:
       type: object
@@ -1475,10 +1569,11 @@ components:
         access_token:
           type: string
           description: JWT PS256+, vinculado al certificado (`cnf.x5t#S256`).
+          examples: ["eyJhbGciOiJQUzI1NiIsImtpZCI6ImVudGlkYWQtMjAyNi0wOSJ9.eyJpc3MiOiJodHRwczovL2F1dGguZW50aWRhZC1maW5hbmNpZXJhLmV4YW1wbGUiLCJzdWIiOiJhbGlhZG8tZGVtby0wMDEiLCJjbmYiOnsieDV0I1MyNTYiOiJTM1haMG9YazhfMnZHMVE5cjV3cTRiWms4WWwwbU43cFEyc1Q0dVY2d1g4In0sInNjb3BlIjoiY29uc2VudHM6cmVhZCBwYXltZW50czppbml0aWF0ZSBwYXltZW50czpyZWFkIiwiZXhwIjoxNzU3NTQ4OTI3fQ.firma-de-ejemplo"]
         token_type: { type: string, const: Bearer }
-        expires_in: { type: integer, description: "Segundos. Corto por diseño (≤ 600)." }
-        scope: { type: string }
-        refresh_token: { type: string }
+        expires_in: { type: integer, description: "Segundos. Corto por diseño (≤ 600).", examples: [600] }
+        scope: { type: string, examples: ["consents:read payments:initiate payments:read"] }
+        refresh_token: { type: string, description: "Solo para consentimientos `RECURRING`."}
         authorization_details:
           type: array
           description: Lo que el titular autorizó, tal como quedó atado al token.
@@ -1496,17 +1591,20 @@ components:
         consentId:
           type: string
           pattern: "^cns_[A-Za-z0-9]{12,32}$"
+          examples: [cns_7Kd9mQ2pLx4Rt8Vw]
         actions:
           type: array
           items:
             type: string
             enum: [initiate, read, capture, cancel, refund]
+          examples: [["initiate", "read"]]
         instrumentType:
           $ref: "#/components/schemas/InstrumentType"
         amount:
           $ref: "#/components/schemas/Amount"
         creditorName:
           type: string
+          examples: ["Tienda Ejemplo S.A.S."]
 
     ErrorOAuth:
       type: object
@@ -1515,7 +1613,7 @@ components:
         error:
           type: string
           examples: [invalid_request, invalid_client, invalid_grant, invalid_scope, authorization_pending]
-        error_description: { type: string }
+        error_description: { type: string, examples: ["El client_assertion tiene un aud distinto del issuer"] }
 
     ConnectionTestResult:
       type: object
@@ -1679,7 +1777,12 @@ components:
           description: Referencia que verá el titular en su extracto.
         customerHint:
           type: object
-          description: Solo para flujo `DECOUPLED` (CIBA). Un dato que el titular ya entregó al aliado y que la entidad reconoce. Nunca credenciales.
+          description: |
+            Solo para flujo `DECOUPLED` (CIBA). Un dato que el titular ya entregó al aliado y
+            que la entidad reconoce. Nunca credenciales. **La respuesta es idéntica exista o no
+            un cliente con esa identificación** (`201 AWAITING_AUTHORISATION`): si nadie puede
+            confirmar, el consentimiento simplemente vence. Este endpoint no sirve para saber
+            quién es cliente de la entidad, y los consentimientos `DECOUPLED` tienen cuota propia.
           additionalProperties: false
           properties:
             identification:
